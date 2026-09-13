@@ -4,7 +4,6 @@
 #include "ConfigMenu.h"
 #include "SkinBridge.h"
 
-#include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/player/ClientJoinLevelEvent.h"
 #include "ll/api/mod/NativeMod.h"
@@ -20,14 +19,23 @@
 // (excluded from the android build in xmake.lua) in case a future
 // Windows/BDS-side build ever wants them back.
 
+// Command registration requires mc/server/commands headers (CommandOrigin,
+// CommandOutput) which only exist in LeviLamina's BDS build, not in
+// preloader-android. For Android, cape access will be via the canvas
+// bridge + event listeners only (no /cape command). Wrap this section
+// in #ifdef if you later add a BDS build target.
+#ifdef LL_TARGET_WINDOWS
+#include "ll/api/command/CommandRegistrar.h"
 #include "mc/server/commands/CommandOrigin.h"
 #include "mc/server/commands/CommandOutput.h"
 #include "mc/world/actor/player/Player.h"
+#endif
 
 namespace customcape {
 
 namespace {
 
+#ifdef LL_TARGET_WINDOWS
 void registerCapeCommand() {
     auto& cmd = ll::command::CommandRegistrar::getInstance(/*isClientSide=*/true)
                     .getOrCreateCommand("cape", "Open the Custom Cape menu");
@@ -46,6 +54,7 @@ void registerCapeCommand() {
         openCapeMenu(*player);
     });
 }
+#endif
 
 void wireCanvasSaveCallback() {
     setCanvasSaveCallback([](std::string const& base64Rgba, int width, int height, std::string const& name) {
@@ -109,10 +118,12 @@ struct Bootstrap {
         });
 
         mod.onEnable([](ll::mod::Mod& self) -> bool {
+#ifdef LL_TARGET_WINDOWS
             registerCapeCommand();
+#endif
             wireCanvasSaveCallback();
             reapplySavedCapeOnJoin();
-            self.getLogger().info("CustomCapeMod enabled — try /cape in-game.");
+            self.getLogger().info("CustomCapeMod enabled");
             return true;
         });
 

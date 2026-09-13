@@ -12,7 +12,12 @@
 // player's SerializedSkin right before it's attached to the outgoing skin
 // packet — on past Bedrock versions this has lived on LocalPlayer or on a
 // small SerializedSkin builder type.
+//
+// NOTE: This header only exists on LeviLamina's Windows/BDS build.
+// For Android (preloader-android), the hook is disabled.
+#ifdef LL_TARGET_WINDOWS
 #include "mc/world/actor/player/LocalPlayer.h"
+#endif
 
 namespace customcape {
 
@@ -54,7 +59,11 @@ bool clearCapeFromLocalPlayer() {
 // skin right before it's serialized, overwrite the cape fields only
 // (skin id / geometry untouched), then let the original continue so the
 // normal PlayerSkinPacket send path takes it from there.
+//
+// NOTE: This hook only compiles and runs on LeviLamina's Windows/BDS build.
+// For Android (preloader-android), it's disabled.
 // ---------------------------------------------------------------------
+#ifdef LL_TARGET_WINDOWS
 LL_AUTO_INSTANCE_HOOK(
     CustomCapeSkinHook,
     LocalPlayer,
@@ -74,5 +83,6 @@ LL_AUTO_INSTANCE_HOOK(
     }
     origin(skin);
 }
+#endif
 
 } // namespace customcape
