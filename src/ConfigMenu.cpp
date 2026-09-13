@@ -3,28 +3,19 @@
 #include "CapeCanvasBridge.h"
 #include "CapeData.h"
 #include "CapeManager.h"
-#include "CapeSyncPacket.h"
 #include "SkinBridge.h"
 
 #include "ll/api/form/ModalForm.h"
 #include "ll/api/form/SimpleForm.h"
 
+// NOTE: broadcastCapeState()/CapeSyncPacket dropped for the Android build —
+// see the comment in Main.cpp. Other players already see your cape via the
+// vanilla skin payload (SkinBridge.h); this only removes the "N nearby mod
+// users" extra, not cape visibility itself.
+
 namespace customcape {
 
 namespace {
-
-void broadcastCapeState(Player& player, CapeData const* cape) {
-    CapeSyncPacket packet;
-    packet.playerName    = player.getRealName();
-    packet.hasCustomCape = cape != nullptr;
-    if (cape) {
-        packet.capeName    = cape->name;
-        packet.width       = cape->width;
-        packet.height      = cape->height;
-        packet.pixelsRGBA  = cape->pixelsRGBA;
-    }
-    packet.sendToServer();
-}
 
 void openCapePicker(Player& player) {
     auto entries = CapeManager::getInstance().listAvailableCapes();
@@ -46,7 +37,6 @@ void openCapePicker(Player& player) {
             }
             CapeManager::getInstance().setActiveCape(path);
             applyCapeToLocalPlayer(*cape);
-            broadcastCapeState(p, &*cape);
             ll::form::ModalForm("Cape Editor", "Cape equipped: " + cape->name, "Nice!", "")
                 .sendTo(p);
         });
@@ -64,7 +54,6 @@ void openCapeMenu(Player& player) {
     std::string status = active
         ? ("Current cape: " + active->name)
         : "No custom cape equipped";
-    status += "\nNearby mod users wearing custom capes: " + std::to_string(getNearbyCapeCount());
 
     ll::form::SimpleForm form("Custom Cape", status);
 
@@ -87,7 +76,6 @@ void openCapeMenu(Player& player) {
         form.appendButton("🚫  Remove custom cape", [](Player& p) {
             CapeManager::getInstance().clearActiveCape();
             clearCapeFromLocalPlayer();
-            broadcastCapeState(p, nullptr);
         });
     }
 

@@ -1,7 +1,6 @@
 #include "CapeCanvasBridge.h"
 #include "CapeData.h"
 #include "CapeManager.h"
-#include "CapeSyncPacket.h"
 #include "ConfigMenu.h"
 #include "SkinBridge.h"
 
@@ -9,7 +8,17 @@
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/player/ClientJoinLevelEvent.h"
 #include "ll/api/mod/NativeMod.h"
-#include "ll/api/network/packet/PacketBase.h"
+
+// NOTE: CapeSyncPacket / ll::network is a BDS-server-side API — the
+// preloader-android package used to build this mod for LeviLaunchroid
+// doesn't ship "ll/api/network/packet/PacketBase.h" at all (confirmed by
+// build failure), and per CapeSyncPacket.h's own comment it was only a
+// *supplementary* channel anyway. Cape visibility for other players
+// already works through SkinBridge.h (embedded in the vanilla skin
+// payload), so the sync-packet feature is dropped for the Android build
+// rather than reimplemented. CapeSyncPacket.cpp/.h stay in the repo
+// (excluded from the android build in xmake.lua) in case a future
+// Windows/BDS-side build ever wants them back.
 
 #include "mc/server/commands/CommandOrigin.h"
 #include "mc/server/commands/CommandOutput.h"
@@ -72,16 +81,6 @@ void reapplySavedCapeOnJoin() {
     );
 }
 
-void registerSyncPacket() {
-    // Wires CapeSyncPacket to CapeSyncHandler so other mod users' cape
-    // announcements get cached (see CapeSyncPacket.cpp / getNearbyCapeCount()).
-    static CapeSyncHandler handler;
-    // TODO: confirm the exact registration call for a PacketHandlerBase
-    // instance in your build (this family typically exposes something
-    // like ll::network::PacketRegistrar or an EventBus-based network
-    // event — check ll/api/network/ headers for the current name).
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------
@@ -113,7 +112,6 @@ struct Bootstrap {
             registerCapeCommand();
             wireCanvasSaveCallback();
             reapplySavedCapeOnJoin();
-            registerSyncPacket();
             self.getLogger().info("CustomCapeMod enabled — try /cape in-game.");
             return true;
         });

@@ -1,3 +1,23 @@
+-- CustomCapeMod — xmake build script (FIXED for Android/LeviLaunchroid)
+--
+-- ROOT CAUSE dari error kemarin:
+-- `levilamina` (dari repo `levimc-repo`) adalah package Windows/BDS-oriented.
+-- Target Android arm64-v8a buat package ini masih berstatus "Future" di
+-- docs resmi LeviLamina (belum didukung) — makanya dependency internalnya
+-- `symbolprovider` gagal compile ("windows.h file not found") begitu
+-- di-cross-compile ke Android.
+--
+-- FIX: LeviLaunchroid native mod (client Android) pakai package terpisah,
+-- `preloader-android` (bukan `levilamina`), yang expose namespace `ll::`
+-- yang sama tapi di-build khusus buat Android. Ini persis pattern yang
+-- dipakai `BedrockTools-1.4.8/xmake.lua` yang udah terbukti compile.
+
+add_rules("mode.debug", "mode.release")
+set_policy("package.requires_lock", true)
+
+-- Custom package definition — xmake-repo (levimc-repo) TIDAK menyediakan
+-- package "preloader" ini secara built-in, jadi kita declare manual persis
+-- kayak yang dipakai BedrockTools.
 package("preloader")
     set_homepage("https://github.com/LiteLDev/preloader-android")
     set_description("Preloader Android")
@@ -16,7 +36,9 @@ target("CustomCapeMod")
     set_kind("shared")
     set_languages("c++20")
     set_strip("all")
-    add_files("src/*.cpp")
+    -- CapeSyncPacket.cpp dikecualikan: pakai ll::network yang nggak
+    -- ke-ship di package "preloader" (Android) — lihat comment di Main.cpp.
+    add_files("src/*.cpp|CapeSyncPacket.cpp")
     add_includedirs("src")
     add_packages("preloader", "nlohmann_json")
 
