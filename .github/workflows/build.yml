@@ -1,0 +1,49 @@
+name: Build CustomCapeMod
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c # match whatever NDK your other LeviLaunchroid mods build against
+
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+
+      - name: Configure (android target)
+        run: |
+          xmake f -p android --ndk="${{ steps.setup-ndk.outputs.ndk-path }}" -a arm64-v8a -m release -y
+
+      - name: Build
+        run: xmake build -v CustomCapeMod
+
+      - name: Collect artifact
+        run: |
+          mkdir -p out/CustomCapeMod
+          cp bin/CustomCapeMod.so out/CustomCapeMod/ 2>/dev/null || true
+          cp manifest.json out/CustomCapeMod/
+          cp -r assets out/CustomCapeMod/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CustomCapeMod-android
+          path: out/CustomCapeMod
+
+# NOTE: the NDK version, ABI (arm64-v8a), and xmake `-p android` flags
+# above are a starting point. Since you already have GitHub Actions
+# compiling other native LeviLaunchroid mods successfully, copy the
+# exact `xmake f ...` line (and NDK setup step) from one of those
+# working workflows instead of this guess — it's already proven against
+# your actual toolchain/ABI combo.

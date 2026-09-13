@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Cape Editor</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 8px;
+    background: #1b1b22; color: #eee;
+    font-family: sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  }
+  h1 { font-size: 15px; margin: 0 0 8px; text-align: center; font-weight: 600; }
+
+  .size-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 12px; }
+  .size-row input[type=number] { width: 56px; padding: 4px; border-radius: 6px; border: 1px solid #444; background: #2a2a33; color: #eee; }
+  .size-row input[type=text] { flex: 1; padding: 4px 8px; border-radius: 6px; border: 1px solid #444; background: #2a2a33; color: #eee; }
+
+  #canvasWrap {
+    flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center;
+    background: repeating-conic-gradient(#2a2a33 0% 25%, #23232b 0% 50%) 0 0 / 16px 16px;
+    border-radius: 8px; border: 1px solid #333; touch-action: none;
+  }
+  #canvas { image-rendering: pixelated; cursor: crosshair; }
+
+  .toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .toolbar button {
+    flex: 1 1 auto; min-width: 52px; padding: 8px 4px; font-size: 18px;
+    border-radius: 8px; border: 1px solid #444; background: #2a2a33; color: #eee;
+  }
+  .toolbar button.active { background: #4a7dff; border-color: #4a7dff; }
+  .toolbar button:disabled { opacity: 0.4; }
+
+  .bottom-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  #colorInput { width: 44px; height: 40px; border: none; border-radius: 8px; padding: 0; background: none; }
+  .swatches { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
+  .swatch { width: 24px; height: 24px; border-radius: 6px; border: 1px solid #555; flex-shrink: 0; }
+
+  .action-row { display: flex; gap: 8px; margin-top: 8px; }
+  .action-row button {
+    flex: 1; padding: 10px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600;
+  }
+  #saveBtn { background: #3ecf6b; color: #06210f; }
+  #cancelBtn { background: #333; color: #eee; }
+  #importInput { display: none; }
+</style>
+</head>
+<body>
+  <h1>Draw your cape</h1>
+
+  <div class="size-row">
+    <span>W</span><input type="number" id="widthInput" value="64" min="1" max="640">
+    <span>H</span><input type="number" id="heightInput" value="32" min="1" max="320">
+    <button id="resizeBtn" style="padding:4px 10px;border-radius:6px;border:1px solid #444;background:#2a2a33;color:#eee;">Apply</button>
+    <input type="text" id="nameInput" placeholder="Cape name" value="MyCape">
+  </div>
+
+  <div id="canvasWrap">
+    <canvas id="canvas" width="64" height="32"></canvas>
+  </div>
+
+  <div class="toolbar">
+    <button id="toolBrush" class="active" title="Brush">✏️</button>
+    <button id="toolEraser" title="Eraser">🧽</button>
+    <button id="toolBucket" title="Bucket fill">🪣</button>
+    <button id="toolPicker" title="Color picker">💧</button>
+    <button id="undoBtn" title="Undo">↶</button>
+    <button id="redoBtn" title="Redo">↷</button>
+    <button id="importBtn" title="Import PNG">🖼️</button>
+  </div>
+  <input type="file" id="importInput" accept="image/png,image/*">
+
+  <div class="bottom-row">
+    <input type="color" id="colorInput" value="#ff2d55">
+    <div class="swatches" id="swatches"></div>
+  </div>
+
+  <div class="action-row">
+    <button id="cancelBtn">Cancel</button>
+    <button id="saveBtn">Save cape</button>
+  </div>
+
+<script>
+(function () {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const wrap = document.getElementById('canvasWrap');
+
+  const MAX_W = 640, MAX_H = 320;
+  let pixelSize = 8; // on-screen scale per cape pixel, recalculated on resize
+  let tool = 'brush';
+  let currentColor = hexToRgba(document.getElementById('colorInput').value);
+  let recentColors = [];
+
+  let undoStack = [];
+  let redoStack = [];
+  const MAX_HISTORY = 30;
+
+  // --- setup -----------------------------------------------------------
+
+  function hexToRgba(hex) {
+    const r = parseInt(hex.substr(1, 2), 16);
+    const g = parseInt(hex.substr(3, 2), 16);
+    const b = parseInt(hex.substr(5, 2), 16);
+    return [r, g, b, 255];
+  }
+  function rgbaToHex([r, g, b]) {
+    const h = n => n.toString(16).padStart(2, '0');
+    return '#' + h(r) + h(g) + h(b);
+  }
+
+  function fitPixelSize() {
+    const availW = wrap.clientWidth - 4;
+    const availH = wrap.clientHeight - 4;
+    pixelSize = Math.max(1, Math.floor(Math.min(availW / canvas.width, availH / canvas.height)));
+    canvas.style.width = (canvas.width * pixelSize) + 'px';
+    canvas.style.height = (canvas.height * pixelSize) + 'px';
+  }
+
+  function resizeCanvas(w, h) {
+    w = Math.max(1, Math.min(MAX_W, w|0));
+    h = Math.max(1, Math.min(MAX_H, h|0));
+    const old = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    canvas.width = w;
+    canvas.height = h;
+    ctx.imageSmoothingEnabled = false;
+    ctx.putImageData(old, 0, 0); // keeps existing pixels anchored top-left
+    fitPixelSize();
+    pushHistory();
+  }
+
+  function clearCanvasTransparent() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  // --- history -----------------------------------------------------------
+
+  function pushHistory() {
+    const snap = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    undoStack.push(snap);
+    if (undoStack.length > MAX_HISTORY) undoStack.shift();
+    redoStack = [];
+    updateUndoRedoButtons();
+  }
+  function undo() {
+    if (undoStack.length < 2) return;
+    redoStack.push(undoStack.pop());
+    ctx.putImageData(undoStack[undoStack.length - 1], 0, 0);
+    updateUndoRedoButtons();
+  }
+  function redo() {
+    if (redoStack.length === 0) return;
+    const snap = redoStack.pop();
+    undoStack.push(snap);
+    ctx.putImageData(snap, 0, 0);
+    updateUndoRedoButtons();
+  }
+  function updateUndoRedoButtons() {
+    document.getElementById('undoBtn').disabled = undoStack.length < 2;
+    document.getElementById('redoBtn').disabled = redoStack.length === 0;
+  }
+
+  // --- drawing -----------------------------------------------------------
+
+  function setPixel(x, y, [r, g, b, a]) {
+    if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return;
+    ctx.fillStyle = a === 0 ? 'rgba(0,0,0,0)' : `rgba(${r},${g},${b},${a / 255})`;
+    if (a === 0) {
+      ctx.clearRect(x, y, 1, 1);
+    } else {
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+
+  function getPixel(x, y) {
+    const d = ctx.getImageData(x, y, 1, 1).data;
+    return [d[0], d[1], d[2], d[3]];
+  }
+
+  function bucketFill(x, y, fillColor) {
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = img.data;
+    const w = canvas.width, h = canvas.height;
+    const idx = (px, py) => (py * w + px) * 4;
+
+    const start = idx(x, y);
+    const target = [data[start], data[start + 1], data[start + 2], data[start + 3]];
+    if (target.every((v, i) => v === fillColor[i])) return;
+
+    const stack = [[x, y]];
+    const visited = new Uint8Array(w * h);
+
+    while (stack.length) {
+      const [cx, cy] = stack.pop();
+      if (cx < 0 || cy < 0 || cx >= w || cy >= h) continue;
+      const vIdx = cy * w + cx;
+      if (visited[vIdx]) continue;
+      const i = vIdx * 4;
+      if (data[i] !== target[0] || data[i+1] !== target[1] || data[i+2] !== target[2] || data[i+3] !== target[3]) continue;
+
+      visited[vIdx] = 1;
+      data[i] = fillColor[0]; data[i+1] = fillColor[1]; data[i+2] = fillColor[2]; data[i+3] = fillColor[3];
+
+      stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function canvasCoordsFromEvent(e) {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    const x = Math.floor((clientX - rect.left) / pixelSize);
+    const y = Math.floor((clientY - rect.top) / pixelSize);
+    return [x, y];
+  }
+
+  let painting = false;
+  function pointerDown(e) {
+    e.preventDefault();
+    painting = true;
+    handlePaint(e);
+  }
+  function pointerMove(e) {
+    if (!painting) return;
+    e.preventDefault();
+    handlePaint(e);
+  }
+  function pointerUp() {
+    if (painting) pushHistory();
+    painting = false;
+  }
+
+  function handlePaint(e) {
+    const [x, y] = canvasCoordsFromEvent(e);
+    if (tool === 'brush') {
+      setPixel(x, y, currentColor);
+    } else if (tool === 'eraser') {
+      setPixel(x, y, [0, 0, 0, 0]);
+    } else if (tool === 'bucket') {
+      bucketFill(x, y, currentColor);
+      painting = false; // one shot
+    } else if (tool === 'picker') {
+      const picked = getPixel(x, y);
+      if (picked[3] > 0) {
+        currentColor = picked;
+        document.getElementById('colorInput').value = rgbaToHex(picked);
+      }
+      painting = false; // one shot
+      setTool('brush');
+    }
+  }
+
+  canvas.addEventListener('mousedown', pointerDown);
+  canvas.addEventListener('mousemove', pointerMove);
+  window.addEventListener('mouseup', pointerUp);
+  canvas.addEventListener('touchstart', pointerDown, { passive: false });
+  canvas.addEventListener('touchmove', pointerMove, { passive: false });
+  window.addEventListener('touchend', pointerUp);
+
+  // --- tools / color -------------------------------------------------------
+
+  function setTool(name) {
+    tool = name;
+    document.querySelectorAll('.toolbar button[id^="tool"]').forEach(b => b.classList.remove('active'));
+    document.getElementById('tool' + name.charAt(0).toUpperCase() + name.slice(1)).classList.add('active');
+  }
+  document.getElementById('toolBrush').onclick = () => setTool('brush');
+  document.getElementById('toolEraser').onclick = () => setTool('eraser');
+  document.getElementById('toolBucket').onclick = () => setTool('bucket');
+  document.getElementById('toolPicker').onclick = () => setTool('picker');
+  document.getElementById('undoBtn').onclick = undo;
+  document.getElementById('redoBtn').onclick = redo;
+
+  document.getElementById('colorInput').addEventListener('input', (e) => {
+    currentColor = hexToRgba(e.target.value);
+  });
+  document.getElementById('colorInput').addEventListener('change', (e) => {
+    addRecentColor(e.target.value);
+  });
+
+  function addRecentColor(hex) {
+    recentColors = [hex, ...recentColors.filter(c => c !== hex)].slice(0, 12);
+    renderSwatches();
+  }
+  function renderSwatches() {
+    const row = document.getElementById('swatches');
+    row.innerHTML = '';
+    recentColors.forEach(hex => {
+      const el = document.createElement('div');
+      el.className = 'swatch';
+      el.style.background = hex;
+      el.onclick = () => {
+        document.getElementById('colorInput').value = hex;
+        currentColor = hexToRgba(hex);
+      };
+      row.appendChild(el);
+    });
+  }
+
+  // --- resize / import / save --------------------------------------------
+
+  document.getElementById('resizeBtn').onclick = () => {
+    const w = parseInt(document.getElementById('widthInput').value, 10) || canvas.width;
+    const h = parseInt(document.getElementById('heightInput').value, 10) || canvas.height;
+    resizeCanvas(w, h);
+  };
+
+  document.getElementById('importBtn').onclick = () => document.getElementById('importInput').click();
+  document.getElementById('importInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      const w = Math.min(MAX_W, img.width);
+      const h = Math.min(MAX_H, img.height);
+      canvas.width = w;
+      canvas.height = h;
+      document.getElementById('widthInput').value = w;
+      document.getElementById('heightInput').value = h;
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      fitPixelSize();
+      pushHistory();
+    };
+    img.src = URL.createObjectURL(file);
+  });
+
+  function bytesToBase64(bytes) {
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  document.getElementById('saveBtn').onclick = () => {
+    const name = document.getElementById('nameInput').value.trim() || 'MyCape';
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data; // raw RGBA8, matches CapeData
+    const base64 = bytesToBase64(data);
+
+    if (window.AndroidCape && window.AndroidCape.saveCape) {
+      window.AndroidCape.saveCape(base64, canvas.width, canvas.height, name);
+    } else {
+      // Standalone browser testing fallback.
+      console.log('saveCape', { name, width: canvas.width, height: canvas.height, base64Length: base64.length });
+      alert('Saved (standalone test mode — no Android bridge found).');
+    }
+  };
+
+  document.getElementById('cancelBtn').onclick = () => {
+    if (window.AndroidCape && window.AndroidCape.cancel) {
+      window.AndroidCape.cancel();
+    }
+  };
+  window.onBackRequested = () => document.getElementById('cancelBtn').onclick();
+
+  // --- init -----------------------------------------------------------
+
+  window.addEventListener('resize', fitPixelSize);
+  ctx.imageSmoothingEnabled = false;
+  clearCanvasTransparent();
+  fitPixelSize();
+  pushHistory();
+})();
+</script>
+</body>
+</html>
