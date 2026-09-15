@@ -7,7 +7,7 @@
 
 #include "CapeData.h"
 #include "CapeManager.h"
-#include "ll/api/mod/NativeMod.h"
+#include <pl/Mod.hpp>
 
 namespace customcape {
 
@@ -45,13 +45,13 @@ jobject getGameActivity(JNIEnv* /*env*/) {
 // can load it via a plain file:// URI — avoids depending on any
 // LeviLaunchroid-specific asset-packaging convention.
 std::filesystem::path ensureCanvasHtmlOnDisk() {
-    auto dir  = ll::mod::NativeMod::current().getResourceDir();
+    auto dir  = ll::mod::NativeMod::current()->getResourceDir();
     auto path = dir / "cape_canvas.html";
     if (!std::filesystem::exists(path)) {
         // Falls back to the copy your build already places in
         // resources/ (see xmake.lua's after_build step) — this branch
         // only fires if that copy step hasn't run yet.
-        auto shipped = ll::mod::NativeMod::current().getModDir() / "assets" / "cape_canvas.html";
+        auto shipped = ll::mod::NativeMod::current()->getModDir() / "assets" / "cape_canvas.html";
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
         std::filesystem::copy_file(shipped, path, std::filesystem::copy_options::overwrite_existing, ec);
@@ -70,7 +70,7 @@ bool openCapeCanvasEditor() {
     bool    didAttach = false;
     JNIEnv* env       = attachEnv(didAttach);
     if (!env) {
-        ll::mod::NativeMod::current().getLogger().error(
+        ll::mod::NativeMod::current()->getLogger().error(
             "openCapeCanvasEditor: no JavaVM attached yet (JNI_OnLoad not called?)"
         );
         return false;
@@ -78,7 +78,7 @@ bool openCapeCanvasEditor() {
 
     jobject activity = getGameActivity(env);
     if (!activity) {
-        ll::mod::NativeMod::current().getLogger().error(
+        ll::mod::NativeMod::current()->getLogger().error(
             "openCapeCanvasEditor: getGameActivity() is still a placeholder — wire it up first"
         );
         if (didAttach) gJvm->DetachCurrentThread();

@@ -4,7 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "ll/api/mod/NativeMod.h"
+#include <pl/Mod.hpp>
 
 namespace customcape {
 
@@ -73,7 +73,7 @@ bool CapeManager::saveDrawnCape(CapeData const& cape) {
 }
 
 std::filesystem::path CapeManager::configFile() const {
-    return ll::mod::NativeMod::current().getConfigDir() / "active_cape.json";
+    return ll::mod::NativeMod::current()->getConfigDir() / "active_cape.json";
 }
 
 std::optional<CapeData> CapeManager::getActiveCape() const {
@@ -103,7 +103,7 @@ void CapeManager::clearActiveCape() {
 }
 
 void CapeManager::persistActiveCapePath(std::filesystem::path const& path) const {
-    std::filesystem::create_directories(ll::mod::NativeMod::current().getConfigDir());
+    std::filesystem::create_directories(ll::mod::NativeMod::current()->getConfigDir());
     std::ofstream f(configFile(), std::ios::binary | std::ios::trunc);
     if (!f.is_open()) return;
     f << nlohmann::json{{"path", path.string()}}.dump(2);

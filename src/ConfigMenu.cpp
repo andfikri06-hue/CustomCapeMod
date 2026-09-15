@@ -1,90 +1,63 @@
 #include "ConfigMenu.h"
 
-#include "CapeCanvasBridge.h"
 #include "CapeData.h"
 #include "CapeManager.h"
 #include "SkinBridge.h"
 
-#include "ll/api/form/ModalForm.h"
-#include "ll/api/form/SimpleForm.h"
+#include <pl/Mod.hpp>
 
-// NOTE: broadcastCapeState()/CapeSyncPacket dropped for the Android build —
+// NOTE: broadcastCapeState()/CapeSyncPacket dropped for the Android build -
 // see the comment in Main.cpp. Other players already see your cape via the
 // vanilla skin payload (SkinBridge.h); this only removes the "N nearby mod
 // users" extra, not cape visibility itself.
+//
+// NOTE 2: this file used to build a popup menu with ll::form::SimpleForm /
+// ModalForm - that's a LeviLamina (BDS/server) API and doesn't exist on
+// LeviLaunchroid at all (confirmed against the official docs and the
+// QYCottage mod template). There's no confirmed popup-form equivalent
+// here, so cape selection is collapsed into a single cycle-through action
+// wired to a Mod Menu HUD button (see Main.cpp) instead of a picker list.
 
 namespace customcape {
 
-namespace {
+void cycleActiveCape() {
+    auto& log = ll::mod::NativeMod::current()->getLogger();
 
-void openCapePicker(Player& player) {
     auto entries = CapeManager::getInstance().listAvailableCapes();
-
-    ll::form::SimpleForm form(
-        "Choose a cape",
-        entries.empty()
-            ? "No capes found yet. Drop a .json or .png into:\n" + kCapeStorageDir.string()
-            : "Pick a cape saved in your capes folder:"
-    );
-
-    for (auto const& entry : entries) {
-        form.appendButton(entry.displayName, [path = entry.filePath](Player& p) {
-            auto cape = CapeManager::getInstance().loadCape(path);
-            if (!cape) {
-                ll::form::ModalForm("Cape Editor", "That file couldn't be read as a cape.", "OK", "")
-                    .sendTo(p);
-                return;
-            }
-            CapeManager::getInstance().setActiveCape(path);
-            applyCapeToLocalPlayer(*cape);
-            ll::form::ModalForm("Cape Editor", "Cape equipped: " + cape->name, "Nice!", "")
-                .sendTo(p);
-        });
+    if (entries.empty()) {
+        log.warn("No capes found in {} - drop a .json or .png there first.", kCapeStorageDir.string());
+        return;
     }
 
-    form.appendButton("« Back", [](Player& p) { openCapeMenu(p); });
-    form.sendTo(player);
+    // Find the currently active cape's position so "cycle" advances to
+    // the next one, rather than always jumping back to the first.
+    auto   active    = CapeManager::getInstance().getActiveCape();
+    size_t nextIndex = 0;
+    if (active) {
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].displayName == active->name) {
+                nextIndex = (i + 1) % entries.size();
+                break;
+            }
+        }
+    }
+
+    auto const& next = entries[nextIndex];
+    auto        cape = CapeManager::getInstance().loadCape(next.filePath);
+    if (!cape) {
+        log.error("Cape file couldn't be read: {}", next.filePath.string());
+        return;
+    }
+
+    CapeManager::getInstance().setActiveCape(next.filePath);
+    applyCapeToLocalPlayer(*cape);
+    log.info("Cape equipped: {}", cape->name);
 }
 
-} // namespace
-
-void openCapeMenu(Player& player) {
-    auto active = CapeManager::getInstance().getActiveCape();
-
-    std::string status = active
-        ? ("Current cape: " + active->name)
-        : "No custom cape equipped";
-
-    ll::form::SimpleForm form("Custom Cape", status);
-
-    form.appendButton("🎨  Draw a new cape", [](Player& p) {
-        if (!openCapeCanvasEditor()) {
-            ll::form::ModalForm(
-                "Cape Editor",
-                "Couldn't open the drawing canvas on this build yet — "
-                "the Android bridge needs to be wired up first "
-                "(see CapeCanvasBridge.cpp). You can still add capes by "
-                "dropping a .json or .png into:\n" + kCapeStorageDir.string(),
-                "OK", ""
-            ).sendTo(p);
-        }
-    });
-
-    form.appendButton("📁  Choose from folder", [](Player& p) { openCapePicker(p); });
-
-    if (active) {
-        form.appendButton("🚫  Remove custom cape", [](Player& p) {
-            CapeManager::getInstance().clearActiveCape();
-            clearCapeFromLocalPlayer();
-        });
-    }
-
-    form.appendButton("🔄  Refresh capes folder", [](Player& p) {
-        CapeManager::getInstance().ensureStorageDir();
-        openCapeMenu(p);
-    });
-
-    form.sendTo(player);
+void removeActiveCape() {
+    CapeManager::getInstance().clearActiveCape();
+    clearCapeFromLocalPlayer();
+    ll::mod::NativeMod::current()->getLogger().info("Custom cape removed.");
 }
 
 } // namespace customcape
