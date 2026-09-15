@@ -31,6 +31,12 @@ package_end()
 
 add_requires("preloader")
 add_requires("nlohmann_json")
+-- pl/Logger.hpp (pulled in by pl/Mod.hpp) directly does
+-- `#include <fmt/format.h>`, but the custom "preloader" package recipe
+-- above only declares `cmake` as a dep (needed to build the package
+-- itself) - it doesn't propagate fmt's include path to consumers. Ship
+-- fmt as its own required package so the header is actually available.
+add_requires("fmt")
 
 target("CustomCapeMod")
     set_kind("shared")
@@ -40,7 +46,7 @@ target("CustomCapeMod")
     -- ke-ship di package "preloader" (Android) — lihat comment di Main.cpp.
     add_files("src/*.cpp|CapeSyncPacket.cpp")
     add_includedirs("src")
-    add_packages("preloader", "nlohmann_json")
+    add_packages("preloader", "nlohmann_json", "fmt")
 
     -- Android / LeviLaunchroid target
     if is_plat("android") then
