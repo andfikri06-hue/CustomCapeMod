@@ -1,12 +1,9 @@
 {
   "entry": "CustomCapeMod.so",
   "name": "CustomCapeMod",
-  "type": "native",
+  "type": "preload-native",
   "platform": "android",
   "version": "1.0.0",
-  "author": "Fikri",
-  "description": "Import, draw, and share custom capes on LeviLauncher (LeviLaunchroid), Minecraft Bedrock 26.45.",
-  "dependencies": [
-    { "name": "LeviLamina" }
-  ]
+  "author": "mhlukhidup",
+  "description": "custom cape mod for bedrock"
 }
