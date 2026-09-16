@@ -26,17 +26,6 @@ jobs:
         run: |
           xmake f -p android --ndk="${{ steps.setup-ndk.outputs.ndk-path }}" -a arm64-v8a -m release -y
 
-      - name: Fetch packages (so headers exist on disk before we peek at them)
-        run: xmake require -y
-
-      - name: Debug - dump real ModMenu.hpp / Mod.hpp headers
-        run: |
-          echo "===== ModMenu.hpp ====="
-          find ~/.xmake -path "*preloader*" -iname "ModMenu.hpp" -exec cat {} \;
-          echo ""
-          echo "===== Mod.hpp ====="
-          find ~/.xmake -path "*preloader*" -iname "Mod.hpp" -exec cat {} \;
-
       - name: Build
         run: xmake build -v CustomCapeMod
 
