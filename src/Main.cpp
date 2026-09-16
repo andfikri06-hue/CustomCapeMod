@@ -33,14 +33,16 @@
 //     args (self.getLogger().error("... {}: {}", a, b)), not string
 //     concatenation - matched below throughout this file.
 //
-// STILL A PLACEHOLDER (could only confirm the header path
-// <pl/ModMenu.hpp> exists, not its exact class/method names - the
-// template's own main.cpp with the PL_REGISTER_MOD call and its
-// ModMenu usage wasn't fetchable to verify further): the
-// ModuleBuilder/ButtonBuilder chain below. Confirm against your synced
-// headers with:
-//   find ~ -path "*preloader*" -iname "ModMenu.hpp"
-// and adjust names if they differ.
+// ALSO CONFIRMED (dumped directly from the CI runner's synced
+// pl/ModMenu.hpp, not docs prose or guesswork) - this header's shape is
+// notably not a typical fluent builder:
+//   - ModuleBuilder/ButtonBuilder's terminal call is .registerModule() /
+//     .registerButton() - a method on the builder itself, returning
+//     bool - not .build().
+//   - There's no .onClick()/.onLongPress(). Buttons only expose
+//     .onEvent(callback), where callback receives
+//     (buttonId, ButtonEvent, value) and ButtonEvent is an enum
+//     {Click, Down, Up, StateChanged, Scroll}.
 #include <pl/ModMenu.hpp>
 
 namespace customcape {
@@ -101,29 +103,53 @@ public:
         auto& self = getSelf();
         self.getLogger().debug("Enabling...");
 
-        // PLACEHOLDER chain - header path <pl/ModMenu.hpp> is
-        // confirmed to exist, but these exact method names are not
-        // (see the note above the includes). Confirm against your
-        // synced headers.
-        pl::modmenu::ModuleBuilder("customcape", "Custom Cape")
-            .description("Import, draw, and equip custom capes")
-            .build();
+        // CONFIRMED against the real pl/ModMenu.hpp (dumped straight
+        // from the CI runner's synced package - see chat history for
+        // the full header). Two things that differ from a typical
+        // fluent builder:
+        //   - The terminal call is .registerModule() / .registerButton()
+        //     (a method on the builder itself, returns bool) - there is
+        //     no .build().
+        //   - There's no .onClick()/.onLongPress(). Buttons only have
+        //     .onEvent(callback), where callback receives
+        //     (buttonId, ButtonEvent, value) and ButtonEvent is an enum
+        //     {Click, Down, Up, StateChanged, Scroll} - so a tap handler
+        //     checks `event == pl::modmenu::ButtonEvent::Click` inside
+        //     one shared callback.
+        bool moduleOk = pl::modmenu::ModuleBuilder("customcape", "Custom Cape")
+                             .description("Import, draw, and equip custom capes")
+                             .registerModule();
+        if (!moduleOk) self.getLogger().error("Failed to register the Custom Cape Mod Menu module.");
 
-        pl::modmenu::ButtonBuilder("customcape_cape", "Cape")
-            .onClick([]() { cycleActiveCape(); })
-            .onLongPress([]() { removeActiveCape(); })
-            .build();
+        bool capeBtnOk = pl::modmenu::ButtonBuilder("customcape_cape", "Cape")
+                              .moduleId("customcape")
+                              .onEvent([](std::string_view, pl::modmenu::ButtonEvent event, float) {
+                                  if (event == pl::modmenu::ButtonEvent::Click) cycleActiveCape();
+                              })
+                              .registerButton();
+        if (!capeBtnOk) self.getLogger().error("Failed to register the Cape button.");
 
-        pl::modmenu::ButtonBuilder("customcape_draw", "Draw")
-            .onClick([]() {
-                if (!openCapeCanvasEditor()) {
-                    CustomCapeMod::instance().getSelf().getLogger().error(
-                        "Couldn't open the drawing canvas - see CapeCanvasBridge.cpp "
-                        "(getGameActivity() is still a placeholder there)."
-                    );
-                }
-            })
-            .build();
+        bool removeBtnOk = pl::modmenu::ButtonBuilder("customcape_remove", "Remove")
+                                .moduleId("customcape")
+                                .onEvent([](std::string_view, pl::modmenu::ButtonEvent event, float) {
+                                    if (event == pl::modmenu::ButtonEvent::Click) removeActiveCape();
+                                })
+                                .registerButton();
+        if (!removeBtnOk) self.getLogger().error("Failed to register the Remove button.");
+
+        bool drawBtnOk = pl::modmenu::ButtonBuilder("customcape_draw", "Draw")
+                              .moduleId("customcape")
+                              .onEvent([](std::string_view, pl::modmenu::ButtonEvent event, float) {
+                                  if (event != pl::modmenu::ButtonEvent::Click) return;
+                                  if (!openCapeCanvasEditor()) {
+                                      CustomCapeMod::instance().getSelf().getLogger().error(
+                                          "Couldn't open the drawing canvas - see CapeCanvasBridge.cpp "
+                                          "(getGameActivity() is still a placeholder there)."
+                                      );
+                                  }
+                              })
+                              .registerButton();
+        if (!drawBtnOk) self.getLogger().error("Failed to register the Draw button.");
 
         wireCanvasSaveCallback();
         initSkinHook();
@@ -139,13 +165,14 @@ public:
             applyCapeToLocalPlayer(*active);
         }
 
-        self.getLogger().info("CustomCapeMod enabled - tap Cape to cycle, hold to remove, Draw to paint a new one.");
+        self.getLogger().info("CustomCapeMod enabled - tap Cape to cycle, Remove to clear, Draw to paint a new one.");
         return true;
     }
 
     bool disable() {
         getSelf().getLogger().debug("Disabling...");
         pl::modmenu::unregisterButton("customcape_draw");
+        pl::modmenu::unregisterButton("customcape_remove");
         pl::modmenu::unregisterButton("customcape_cape");
         pl::modmenu::unregisterModule("customcape");
         return true;

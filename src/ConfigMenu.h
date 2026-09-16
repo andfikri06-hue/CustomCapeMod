@@ -13,8 +13,8 @@ namespace customcape {
 // natural place to swap back to a proper picker.
 void cycleActiveCape();
 
-// Clears whatever cape is currently equipped. Bound to the "Cape"
-// button's long-press callback in Main.cpp.
+// Clears whatever cape is currently equipped. Bound to the "Remove"
+// Mod Menu button's tap callback in Main.cpp.
 void removeActiveCape();
 
 } // namespace customcape
