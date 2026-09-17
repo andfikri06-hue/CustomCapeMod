@@ -2,6 +2,7 @@
 #include "CapeData.h"
 #include "CapeManager.h"
 #include "ConfigMenu.h"
+#include "PixelCanvas.h"
 #include "SkinBridge.h"
 
 #include <thread>
@@ -244,19 +245,22 @@ public:
                                 .registerButton();
         if (!removeBtnOk) self.getLogger().error("Failed to register the Remove button.");
 
-        bool drawBtnOk = pl::modmenu::ButtonBuilder("customcape_draw", "Draw")
-                              .moduleId("customcape")
-                              .onEvent([](std::string_view, pl::modmenu::ButtonEvent event, float) {
-                                  if (event != pl::modmenu::ButtonEvent::Click) return;
-                                  if (!openCapeCanvasEditor()) {
-                                      CustomCapeMod::instance().getSelf().getLogger().error(
-                                          "Couldn't open the drawing canvas - see CapeCanvasBridge.cpp "
-                                          "(getGameActivity() is still a placeholder there)."
-                                      );
-                                  }
-                              })
-                              .registerButton();
-        if (!drawBtnOk) self.getLogger().error("Failed to register the Draw button.");
+        // Was: a "Draw" button that launched a separate WebView Activity
+        // via openCapeCanvasEditor() (CapeCanvasBridge.cpp/.h). That's
+        // exactly what crashed in the field (SIGSEGV inside the
+        // getGameActivity()/JNI Activity-lookup placeholder - see the
+        // tombstone from testing). Per your request, the canvas now
+        // lives INSIDE the config menu instead of a separate screen:
+        // registerPixelCanvasButtons() (PixelCanvas.h/.cpp) adds a
+        // D-pad + paint/color/clear/save button set that draws directly
+        // into this module's own HUD overlay via
+        // pl::modmenu::submitDrawCommands - no Activity, no JNI lookup,
+        // so that whole crashing code path is no longer reachable from
+        // any button. CapeCanvasBridge.cpp/.h and CapeCanvasActivity.java
+        // are left in the repo unused rather than deleted, in case you
+        // want a richer freeform canvas again later once
+        // getGameActivity() is actually wired up.
+        registerPixelCanvasButtons();
 
         wireCanvasSaveCallback();
         initSkinHook();
@@ -278,7 +282,7 @@ public:
 
     bool disable() {
         getSelf().getLogger().debug("Disabling...");
-        pl::modmenu::unregisterButton("customcape_draw");
+        unregisterPixelCanvasButtons();
         pl::modmenu::unregisterButton("customcape_remove");
         pl::modmenu::unregisterButton("customcape_cape");
         pl::modmenu::unregisterModule("customcape");
