@@ -122,6 +122,60 @@ bool openCapeCanvasEditor() {
     return ok;
 }
 
+std::optional<std::filesystem::path> downloadCapeFromUrl(std::string const& url) {
+    auto& log = ll::mod::NativeMod::current()->getLogger();
+
+    bool    didAttach = false;
+    JNIEnv* env       = attachEnv(didAttach);
+    if (!env) {
+        log.error("downloadCapeFromUrl: no JavaVM attached yet (JNI_OnLoad not called?)");
+        return std::nullopt;
+    }
+
+    // Deliberately does NOT call getGameActivity() - CapeDownloadHelper
+    // is plain networking + java.util.zip, no Activity/Context needed,
+    // so this path works even before that placeholder is wired up.
+    jclass helperClass = env->FindClass("org/levimc/launcher/customcape/CapeDownloadHelper");
+    if (!helperClass) {
+        log.error("downloadCapeFromUrl: CapeDownloadHelper.java isn't compiled into this build yet");
+        if (didAttach) gJvm->DetachCurrentThread();
+        return std::nullopt;
+    }
+
+    jmethodID method = env->GetStaticMethodID(
+        helperClass, "downloadAndExtractCape", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+    );
+    if (!method) {
+        log.error("downloadCapeFromUrl: downloadAndExtractCape() method not found on CapeDownloadHelper");
+        if (didAttach) gJvm->DetachCurrentThread();
+        return std::nullopt;
+    }
+
+    auto destDir = ll::mod::NativeMod::current()->getDataDir() / "downloads";
+    std::error_code ec;
+    std::filesystem::create_directories(destDir, ec);
+
+    jstring jUrl     = env->NewStringUTF(url.c_str());
+    jstring jDestDir = env->NewStringUTF(destDir.string().c_str());
+
+    auto jResult = static_cast<jstring>(env->CallStaticObjectMethod(helperClass, method, jUrl, jDestDir));
+
+    std::optional<std::filesystem::path> result;
+    if (jResult) {
+        auto const* chars = env->GetStringUTFChars(jResult, nullptr);
+        result             = std::filesystem::path(chars);
+        env->ReleaseStringUTFChars(jResult, chars);
+        env->DeleteLocalRef(jResult);
+    } else {
+        log.error("downloadCapeFromUrl: download/extract failed for {}", url);
+    }
+
+    env->DeleteLocalRef(jUrl);
+    env->DeleteLocalRef(jDestDir);
+    if (didAttach) gJvm->DetachCurrentThread();
+    return result;
+}
+
 } // namespace customcape
 
 // --- JNI entry points -------------------------------------------------
