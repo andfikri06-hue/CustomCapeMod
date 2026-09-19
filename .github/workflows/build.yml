@@ -11,6 +11,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Install d8 (Android build-tools)
+        run: |
+          BUILD_TOOLS_DIR="$ANDROID_HOME/build-tools"
+          if [ -d "$BUILD_TOOLS_DIR" ] && [ -n "$(ls -A "$BUILD_TOOLS_DIR" 2>/dev/null)" ]; then
+            VERSION=$(ls "$BUILD_TOOLS_DIR" | sort -V | tail -1)
+          else
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "build-tools;34.0.0" >/dev/null
+            VERSION="34.0.0"
+          fi
+          echo "$BUILD_TOOLS_DIR/$VERSION" >> "$GITHUB_PATH"
+
+      - name: Compile CapeDownloadHelper.java -> embedded dex header
+        run: |
+          mkdir -p build_java/classes
+          # No -bootclasspath needed: CapeDownloadHelper.java only uses
+          # java.io/java.net/java.util.zip, no android.* APIs.
+          javac -source 8 -target 8 -d build_java/classes src/CapeDownloadHelper.java
+          d8 --output build_java build_java/classes/org/levimc/launcher/customcape/CapeDownloadHelper.class
+          python3 scripts/generate_embedded_dex_header.py build_java/classes.dex src/EmbeddedDex.h
+
       - name: Set up Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
