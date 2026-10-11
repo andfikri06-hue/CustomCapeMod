@@ -42,9 +42,21 @@ target("CustomCapeMod")
     set_kind("shared")
     set_languages("c++20")
     set_strip("all")
-    -- CapeSyncPacket.cpp dikecualikan: pakai ll::network yang nggak
-    -- ke-ship di package "preloader" (Android) — lihat comment di Main.cpp.
-    add_files("src/*.cpp|CapeSyncPacket.cpp")
+    -- Daftar file SENGAJA eksplisit (bukan src/*.cpp):
+    --   * CapeSyncPacket.cpp  -> pakai ll::network yang nggak ke-ship di package
+    --                            "preloader" (Android), jadi tidak ikut build.
+    --   * PixelCanvas.cpp     -> canvas lama (HUD Mod Menu), sudah diganti panel
+    --                            pause menu (Java). File lama aman dibiarkan/dihapus.
+    -- EmbeddedDex.h dibuat otomatis oleh CI (lihat .github/workflows/build.yml).
+    add_files(
+        "src/Main.cpp",
+        "src/Runtime.cpp",
+        "src/CapeCanvasBridge.cpp",
+        "src/CapeData.cpp",
+        "src/CapeManager.cpp",
+        "src/ConfigMenu.cpp",
+        "src/SkinBridge.cpp"
+    )
     add_includedirs("src")
     add_packages("preloader", "nlohmann_json", "fmt")
 
