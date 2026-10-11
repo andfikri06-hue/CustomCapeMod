@@ -1,63 +1,115 @@
 #include "ConfigMenu.h"
 
+#include <exception>
+#include <filesystem>
+
 #include "CapeData.h"
 #include "CapeManager.h"
+#include "Runtime.h"
 #include "SkinBridge.h"
-
-#include <pl/Mod.hpp>
-
-// NOTE: broadcastCapeState()/CapeSyncPacket dropped for the Android build -
-// see the comment in Main.cpp. Other players already see your cape via the
-// vanilla skin payload (SkinBridge.h); this only removes the "N nearby mod
-// users" extra, not cape visibility itself.
-//
-// NOTE 2: this file used to build a popup menu with ll::form::SimpleForm /
-// ModalForm - that's a LeviLamina (BDS/server) API and doesn't exist on
-// LeviLaunchroid at all (confirmed against the official docs and the
-// QYCottage mod template). There's no confirmed popup-form equivalent
-// here, so cape selection is collapsed into a single cycle-through action
-// wired to a Mod Menu HUD button (see Main.cpp) instead of a picker list.
 
 namespace customcape {
 
-void cycleActiveCape() {
-    auto& log = ll::mod::NativeMod::current()->getLogger();
+namespace {
 
-    auto entries = CapeManager::getInstance().listAvailableCapes();
-    if (entries.empty()) {
-        log.warn("No capes found in {} - drop a .json or .png there first.", kCapeStorageDir.string());
-        return;
-    }
+std::string ok(std::string const& text) { return "OK: " + text; }
+std::string err(std::string const& text) { return "ERR: " + text; }
 
-    // Find the currently active cape's position so "cycle" advances to
-    // the next one, rather than always jumping back to the first.
-    auto   active    = CapeManager::getInstance().getActiveCape();
-    size_t nextIndex = 0;
-    if (active) {
-        for (size_t i = 0; i < entries.size(); ++i) {
-            if (entries[i].displayName == active->name) {
-                nextIndex = (i + 1) % entries.size();
-                break;
-            }
-        }
-    }
-
-    auto const& next = entries[nextIndex];
-    auto        cape = CapeManager::getInstance().loadCape(next.filePath);
-    if (!cape) {
-        log.error("Cape file couldn't be read: {}", next.filePath.string());
-        return;
-    }
-
-    CapeManager::getInstance().setActiveCape(next.filePath);
-    applyCapeToLocalPlayer(*cape);
-    log.info("Cape equipped: {}", cape->name);
+// Honest reminder shown with every "equipped" message until the skin hook exists.
+std::string hookNote() {
+    return skinHookInstalled() ? std::string{} : std::string{" (Hook skin belum aktif: belum tampil di karakter.)"};
 }
 
-void removeActiveCape() {
-    CapeManager::getInstance().clearActiveCape();
-    clearCapeFromLocalPlayer();
-    ll::mod::NativeMod::current()->getLogger().info("Custom cape removed.");
+// Loads `path`, makes it the active cape and hands it to the skin bridge.
+std::string equipFile(std::filesystem::path const& path, std::string const& shownName) {
+    auto& mgr  = CapeManager::getInstance();
+    auto  cape = mgr.loadCape(path);
+    if (!cape) return err("File cape rusak atau bukan cape yang valid: " + shownName);
+    if (!mgr.setActiveCape(path)) return err("Gagal menyimpan pilihan cape (config tidak bisa ditulis).");
+
+    applyCapeToLocalPlayer(*cape);
+    rt::info("equipped cape: " + shownName + " (" + std::to_string(cape->width) + "x" + std::to_string(cape->height) + ")");
+    return ok(shownName + " dipilih." + hookNote());
+}
+
+// Every public function funnels through here so no exception can ever reach JNI.
+template <typename F>
+std::string safely(char const* what, F&& body) {
+    try {
+        return body();
+    } catch (std::exception const& ex) {
+        rt::error(std::string(what) + " threw: " + ex.what());
+        return err(std::string("Terjadi error: ") + ex.what());
+    } catch (...) {
+        rt::error(std::string(what) + " threw an unknown exception");
+        return err("Terjadi error yang tidak dikenal.");
+    }
+}
+
+} // namespace
+
+std::string listCapesText() {
+    try {
+        std::string out;
+        for (auto const& entry : CapeManager::getInstance().listAvailableCapes()) {
+            if (!out.empty()) out += '\n';
+            out += entry.displayName;
+        }
+        return out;
+    } catch (...) {
+        return {};
+    }
+}
+
+std::string activeCapeText() {
+    try {
+        return CapeManager::getInstance().activeCapeName();
+    } catch (...) {
+        return {};
+    }
+}
+
+std::string equipCapeByName(std::string const& name) {
+    return safely("equipCapeByName", [&]() -> std::string {
+        auto path = CapeManager::getInstance().findCapeByName(name);
+        if (path.empty()) return err("Cape tidak ditemukan: " + name);
+        return equipFile(path, name);
+    });
+}
+
+std::string removeActiveCape() {
+    return safely("removeActiveCape", []() -> std::string {
+        CapeManager::getInstance().clearActiveCape();
+        clearCapeFromLocalPlayer();
+        rt::info("cape removed");
+        return ok("Cape dilepas.");
+    });
+}
+
+std::string importPngAsCape(std::string const& pngPath, std::string const& name) {
+    return safely("importPngAsCape", [&]() -> std::string {
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(std::filesystem::path(pngPath), ec)) return err("File tidak ditemukan.");
+
+        auto dest = CapeManager::getInstance().importImageAsCape(std::filesystem::path(pngPath), name);
+        if (dest.empty()) return err("Gambar tidak bisa dibaca atau terlalu besar (pakai PNG, maks 2048 px).");
+        return equipFile(dest, dest.stem().string());
+    });
+}
+
+std::string saveDrawnPixels(std::vector<uint8_t> const& rgba, int width, int height, std::string const& name) {
+    return safely("saveDrawnPixels", [&]() -> std::string {
+        CapeData cape;
+        cape.name       = name;
+        cape.width      = width;
+        cape.height     = height;
+        cape.pixelsRGBA = rgba;
+        if (!cape.isValid()) return err("Data gambar tidak valid.");
+
+        auto dest = CapeManager::getInstance().saveDrawnCape(cape);
+        if (dest.empty()) return err("Gagal menyimpan gambar ke folder customcape (izin penyimpanan?).");
+        return equipFile(dest, dest.stem().string());
+    });
 }
 
 } // namespace customcape

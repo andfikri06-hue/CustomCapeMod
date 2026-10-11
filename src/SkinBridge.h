@@ -5,50 +5,37 @@
 namespace customcape {
 
 // ---------------------------------------------------------------------
-// HONEST FLAG — read before wiring this into a release build.
+// HONEST STATUS - read before expecting the cape on the 3D character.
 //
-// This mod targets LeviLaunchroid (Android client), not LeviLamina
-// (BDS/server) - the two have different native APIs despite sharing
-// some naming. Mod lifecycle, Mod Menu UI, and cape storage/canvas are
-// now built against LeviLaunchroid's confirmed Preloader API (see
-// Main.cpp for the specifics and doc links).
+// Everything else in this mod (cape folder, Bedrock Cosmos link import,
+// pixel canvas, the pause-menu panel) works without touching the game's
+// internals. Making the cape show up on the player's model is different:
+// it means writing into Minecraft's own skin/cape data before it is
+// used. LeviLaunchroid (Android client) has no typed headers for that,
+// only address/pattern hooks: pl::memory::resolveSignature(...) to find
+// a function in libminecraftpe.so and pl::memory::hook(...) to detour it.
 //
-// This file is the one piece that can't be built against any typed,
-// documented API at all on this platform. Making the cape show up on
-// the player's actual 3D model means writing into Minecraft's own
-// internal skin/cape data before it goes out on the wire. On LeviLamina
-// (BDS) that internal structure is exposed via reverse-engineered
-// `mc::` headers - but those don't exist for the Android client binary
-// (libminecraftpe.so) at all. The only path here is the same
-// pattern-scan + address hook workflow you already used for
-// BedrockTools' ExtendedRenderDistanceModule (strings/rabin2/r2 to find
-// the function, then a raw hook - see the placeholder in SkinBridge.cpp).
-//
-// The fields being written (skin id, skin/cape width+height+RGBA
-// pixels, a "premium/persona" flag) are the same fields Bedrock's skin
-// payload has used for years and that tools like Bedrock Cosmos rely
-// on - so the *shape* of the data is solid. What's NOT confirmed is the
-// address/pattern and the exact in-memory struct layout for your
-// specific Android build (26.45) - that part needs your own
-// reverse-engineering pass before this does anything at runtime.
+// The pattern + the struct layout for your exact game build (26.51) still
+// have to be found with a reverse-engineering pass (see scripts/ or the
+// chat notes), so initSkinHook() below is a PLACEHOLDER: it logs that the
+// hook is missing and skinHookInstalled() stays false. Equipping a cape
+// still saves your choice and keeps it ready - it just is not drawn on the
+// character until the hook exists.
 // ---------------------------------------------------------------------
 
-// Installs the (currently placeholder) skin-serialize hook. Call once
-// from Main.cpp's enable(). Safe to call even before the real
-// pattern/offsets are filled in - it just logs a warning and no-ops.
+// Called once from enable(). Safe even while the real pattern/offsets are
+// missing: it logs a warning and does nothing else.
 void initSkinHook();
 
-// Rewrites the local player's cape (skin id kept as-is) with `cape`,
-// and re-sends the skin so nearby players immediately see the change.
-// `cape` should already be downscaled via downscaleCape() to whatever
-// cape texture size your target build's SerializedSkin expects.
-//
-// Returns false if no skin-serialize hook has been wired up yet
-// (safe no-op fallback — the mod still works for storage/preview/canvas
-// even before this piece is hooked in).
+// True only when a real skin hook is installed and will use the cape.
+bool skinHookInstalled();
+
+// Remembers `cape` as the one to put on the local player (downscaled to the
+// 64x32 vanilla cape slot) and, once the hook exists, re-sends the skin.
+// Returns false for an invalid cape. Never crashes when no hook is present.
 bool applyCapeToLocalPlayer(CapeData const& cape);
 
-// Reverts to the player's normal (non-custom) cape.
+// Back to the player's normal (non-custom) cape.
 bool clearCapeFromLocalPlayer();
 
 } // namespace customcape

@@ -12,6 +12,10 @@ namespace customcape {
 
 namespace {
 
+// Safety limits for files we did not write ourselves.
+constexpr int    kCapeMaxLoadSide  = 4096;              // px per side
+constexpr size_t kCapeMaxFileBytes = 48u * 1024u * 1024u; // .json cape files
+
 // --- minimal base64 (no external dependency needed for this) ---------
 
 const char kB64Chars[] =
@@ -83,15 +87,32 @@ nlohmann::json capeToJson(CapeData const& cape) {
 }
 
 bool capeFromJson(nlohmann::json const& j, CapeData& out) {
-    if (!j.contains("width") || !j.contains("height") || !j.contains("pixels")) return false;
-    out.name   = j.value("name", std::string{"CustomCape"});
-    out.width  = j.value("width", 0);
-    out.height = j.value("height", 0);
-    out.pixelsRGBA = base64Decode(j.at("pixels").get<std::string>());
-    return out.isValid();
+    // nlohmann throws on wrong types (e.g. "name": 5). An exception that
+    // escapes into JNI would terminate the game, so every field is checked.
+    try {
+        if (!j.is_object() || !j.contains("width") || !j.contains("height") || !j.contains("pixels")) return false;
+        if (!j.at("width").is_number() || !j.at("height").is_number() || !j.at("pixels").is_string()) {
+            return false;
+        }
+        out.name   = (j.contains("name") && j.at("name").is_string()) ? j.at("name").get<std::string>()
+                                                                      : std::string{"CustomCape"};
+        out.width  = j.at("width").get<int>();
+        out.height = j.at("height").get<int>();
+        if (out.width <= 0 || out.height <= 0 || out.width > kCapeMaxLoadSide || out.height > kCapeMaxLoadSide) {
+            return false;
+        }
+        out.pixelsRGBA = base64Decode(j.at("pixels").get<std::string>());
+        return out.isValid();
+    } catch (...) {
+        return false;
+    }
 }
 
 bool loadCapeJson(std::filesystem::path const& path, CapeData& out) {
+    std::error_code ec;
+    auto            size = std::filesystem::file_size(path, ec);
+    if (ec || size == 0 || size > kCapeMaxFileBytes) return false; // missing, empty or absurdly large
+
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) return false;
     nlohmann::json j;
@@ -113,6 +134,12 @@ bool saveCapeJson(std::filesystem::path const& path, CapeData const& cape) {
 
 bool loadCapeFromPng(std::filesystem::path const& path, CapeData& out, std::string const& nameHint) {
     int w = 0, h = 0, channels = 0;
+
+    // Look at the header first: a corrupt / hostile file must not make us
+    // allocate gigabytes before we notice.
+    if (!stbi_info(path.string().c_str(), &w, &h, &channels)) return false;
+    if (w <= 0 || h <= 0 || w > kCapeMaxLoadSide || h > kCapeMaxLoadSide) return false;
+
     unsigned char* pixels = stbi_load(path.string().c_str(), &w, &h, &channels, 4 /* force RGBA */);
     if (!pixels) return false;
 
