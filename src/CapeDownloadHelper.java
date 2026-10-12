@@ -50,14 +50,14 @@ public class CapeDownloadHelper {
         try {
             File dir = new File(destDir);
             if (!dir.exists() && !dir.mkdirs()) {
-                lastError = "Folder sementara tidak bisa dibuat.";
+                lastError = "Could not create the temporary folder.";
                 return null;
             }
 
             URL url = new URL(urlString == null ? "" : urlString.trim());
             String proto = url.getProtocol();
             if (!"https".equalsIgnoreCase(proto) && !"http".equalsIgnoreCase(proto)) {
-                lastError = "Link harus diawali https:// atau http://";
+                lastError = "The link must start with https:// or http://";
                 return null;
             }
 
@@ -69,11 +69,11 @@ public class CapeDownloadHelper {
 
             int code = conn.getResponseCode();
             if (code != HttpURLConnection.HTTP_OK) {
-                lastError = "Server menjawab HTTP " + code + " (cek link-nya).";
+                lastError = "Server answered HTTP " + code + " (check the link).";
                 return null;
             }
             if (conn.getContentLength() > MAX_DOWNLOAD_BYTES) {
-                lastError = "File terlalu besar untuk sebuah cape.";
+                lastError = "File is too big for a cape.";
                 return null;
             }
 
@@ -91,7 +91,7 @@ public class CapeDownloadHelper {
                 if (got == 4 && head[0] == 'P' && head[1] == 'K') {
                     return extractFirstPngFromZip(in, dir);
                 }
-                lastError = "Isi link bukan file PNG atau ZIP.";
+                lastError = "The link does not point to a PNG or ZIP file.";
                 return null;
             } finally {
                 try {
@@ -100,10 +100,10 @@ public class CapeDownloadHelper {
                 }
             }
         } catch (IOException e) {
-            lastError = "Gagal mengunduh: " + shortMessage(e);
+            lastError = "Download failed: " + shortMessage(e);
             return null;
         } catch (RuntimeException e) {
-            lastError = "Link tidak valid: " + shortMessage(e);
+            lastError = "Invalid link: " + shortMessage(e);
             return null;
         } finally {
             if (conn != null) conn.disconnect();
@@ -112,7 +112,7 @@ public class CapeDownloadHelper {
 
     private static String savePng(InputStream in, File out) throws IOException {
         if (!copyLimited(in, out, MAX_PNG_BYTES)) {
-            lastError = "Gambar terlalu besar untuk sebuah cape.";
+            lastError = "Image is too big for a cape.";
             return null;
         }
         return out.getAbsolutePath();
@@ -157,13 +157,13 @@ public class CapeDownloadHelper {
             } catch (IOException ignored) {
             }
         }
-        if (fallbackPath == null) lastError = "Tidak ada gambar PNG di dalam ZIP.";
+        if (fallbackPath == null) lastError = "No PNG image found inside the ZIP.";
         return fallbackPath;
     }
 
     private static void replace(File from, File to) throws IOException {
-        if (to.exists() && !to.delete()) throw new IOException("tidak bisa menimpa " + to.getName());
-        if (!from.renameTo(to)) throw new IOException("tidak bisa menyimpan " + to.getName());
+        if (to.exists() && !to.delete()) throw new IOException("cannot overwrite " + to.getName());
+        if (!from.renameTo(to)) throw new IOException("cannot save " + to.getName());
     }
 
     /** Copies at most `limit` bytes. Returns false (and deletes the partial file) if the data is larger. */
@@ -216,7 +216,7 @@ public class CapeDownloadHelper {
 
         @Override public int read() throws IOException {
             int b = super.read();
-            if (b >= 0 && --left < 0) throw new IOException("file terlalu besar");
+            if (b >= 0 && --left < 0) throw new IOException("file too big");
             return b;
         }
 
@@ -224,7 +224,7 @@ public class CapeDownloadHelper {
             int n = super.read(buf, off, len);
             if (n > 0) {
                 left -= n;
-                if (left < 0) throw new IOException("file terlalu besar");
+                if (left < 0) throw new IOException("file too big");
             }
             return n;
         }

@@ -18,6 +18,10 @@ import java.util.Locale;
  *   right edge   (0,1)  1x16      left edge   (11,1) 1x16
  *   OUTER face   (1,1)  10x16     <- the side people see from behind
  *   INNER face   (12,1) 10x16     <- the side facing the player's back
+ *
+ * Only the two faces can be painted. Pen, eraser and fill are clipped to them,
+ * so colour can never spill onto the edge strips or the gap between the faces;
+ * the 1px edge strips are generated from the OUTER face by toRgba().
  */
 final class CapeEditorModel {
 
@@ -44,12 +48,29 @@ final class CapeEditorModel {
         return x >= 0 && y >= 0 && x < W && y < H;
     }
 
+    private static boolean inRect(int x, int y, int[] r) {
+        return x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3];
+    }
+
+    /** The face (OUTER or INNER) that contains the cell, or null on an edge strip, in the gap or outside the grid. */
+    static int[] faceAt(int x, int y) {
+        if (inRect(x, y, OUTER)) return OUTER;
+        if (inRect(x, y, INNER)) return INNER;
+        return null;
+    }
+
+    /** True only for cells inside the OUTER or INNER face. */
+    static boolean isPaintable(int x, int y) {
+        return faceAt(x, y) != null;
+    }
+
     int get(int x, int y) {
         return inside(x, y) ? px[y * W + x] : 0;
     }
 
+    /** Paints one cell. Cells outside the two faces are ignored. */
     void set(int x, int y, int argb) {
-        if (inside(x, y)) px[y * W + x] = argb;
+        if (inside(x, y) && isPaintable(x, y)) px[y * W + x] = argb;
     }
 
     /** Call once at the start of every stroke / action so undo() can revert it. */
@@ -77,8 +98,17 @@ final class CapeEditorModel {
         return true;
     }
 
-    /** Bresenham line, so fast finger drags don't leave gaps. */
+    /** Bresenham line on any paintable cells (never on the edge strips / gap). */
     void line(int x0, int y0, int x1, int y1, int argb) {
+        line(x0, y0, x1, y1, argb, null);
+    }
+
+    /**
+     * Bresenham line, so fast finger drags don't leave gaps. Cells outside
+     * {@code clip} are skipped: pass the face the stroke started in and the
+     * stroke can never cross a border. {@code clip == null} allows both faces.
+     */
+    void line(int x0, int y0, int x1, int y1, int argb, int[] clip) {
         int dx = Math.abs(x1 - x0);
         int dy = -Math.abs(y1 - y0);
         int sx = x0 < x1 ? 1 : -1;
@@ -86,7 +116,8 @@ final class CapeEditorModel {
         int err = dx + dy;
         int guard = (W + H) * 4;
         while (guard-- > 0) {
-            set(x0, y0, argb);
+            boolean allowed = clip == null ? isPaintable(x0, y0) : inRect(x0, y0, clip) && isPaintable(x0, y0);
+            if (allowed && inside(x0, y0)) px[y0 * W + x0] = argb;
             if (x0 == x1 && y0 == y1) break;
             int e2 = 2 * err;
             if (e2 >= dy) { err += dy; x0 += sx; }
@@ -94,12 +125,18 @@ final class CapeEditorModel {
         }
     }
 
-    /** 4-neighbour flood fill (iterative, bounded by the grid size). */
+    /**
+     * 4-neighbour flood fill (iterative). It stays inside the face that
+     * contains (x, y); a click on an edge strip or in the gap does nothing.
+     */
     void fill(int x, int y, int argb) {
-        if (!inside(x, y)) return;
+        int[] face = faceAt(x, y);
+        if (face == null) return;
         int target = get(x, y);
         if (target == argb) return;
-        int[] stack = new int[W * H];
+        // every cell is filled at most once and pushes at most 4 neighbours,
+        // so 4 * cells + 1 entries can never overflow
+        int[] stack = new int[4 * face[2] * face[3] + 4];
         int sp = 0;
         stack[sp++] = y * W + x;
         while (sp > 0) {
@@ -108,10 +145,10 @@ final class CapeEditorModel {
             int cy = idx / W;
             if (px[idx] != target) continue;
             px[idx] = argb;
-            if (cx > 0     && px[idx - 1] == target) stack[sp++] = idx - 1;
-            if (cx < W - 1 && px[idx + 1] == target) stack[sp++] = idx + 1;
-            if (cy > 0     && px[idx - W] == target) stack[sp++] = idx - W;
-            if (cy < H - 1 && px[idx + W] == target) stack[sp++] = idx + W;
+            if (inRect(cx - 1, cy, face) && px[idx - 1] == target) stack[sp++] = idx - 1;
+            if (inRect(cx + 1, cy, face) && px[idx + 1] == target) stack[sp++] = idx + 1;
+            if (inRect(cx, cy - 1, face) && px[idx - W] == target) stack[sp++] = idx - W;
+            if (inRect(cx, cy + 1, face) && px[idx + W] == target) stack[sp++] = idx + W;
         }
     }
 
@@ -189,6 +226,58 @@ final class CapeEditorModel {
             out[i * 4 + 3] = (byte) ((c >>> 24) & 0xFF); // A
         }
         return out;
+    }
+
+    // ------------------------------------------------------------------
+    // Canvas layout planning (pure maths here so it can be unit-tested)
+    // ------------------------------------------------------------------
+
+    /** How the canvas screen is laid out on a given display. */
+    static final class CanvasPlan {
+        /** Size of one pixel cell on screen, in px. */
+        final int cellPx;
+        /** True: palette + tools sit next to the canvas. False: they sit below it (narrow screens). */
+        final boolean sideBySide;
+
+        CanvasPlan(int cellPx, boolean sideBySide) {
+            this.cellPx = cellPx;
+            this.sideBySide = sideBySide;
+        }
+    }
+
+    static final float MIN_CELL_DP = 8f;
+    private static final float SIDE_BY_SIDE_MIN_CELL_DP = 10f;
+    /** Everything on the canvas screen except the 17 pixel rows: screen margins, card padding, header, footer, hint. */
+    private static final float CHROME_H_DP = 142f;
+    /** Palette column (156) + gap (10) + card padding (20) + screen margins (16). */
+    private static final float SIDE_EXTRA_W_DP = 10f + 156f + 20f + 16f;
+    /** Card padding (20) + screen margins (16). */
+    private static final float STACK_EXTRA_W_DP = 20f + 16f;
+
+    /**
+     * Picks the biggest cell size that lets the whole canvas screen fit on the
+     * display (the card scrolls if it still does not). Landscape phones get the
+     * palette next to the canvas, narrow screens get it underneath.
+     */
+    static CanvasPlan planCanvas(int screenWpx, int screenHpx, float density) {
+        float d = density > 0f ? density : 1f;
+        float wDp = screenWpx / d;
+        float hDp = screenHpx / d;
+        float maxCell = hDp >= 480f ? 16f : 11f;
+
+        float bySideWidth = (wDp - SIDE_EXTRA_W_DP) / W;
+        if (bySideWidth >= SIDE_BY_SIDE_MIN_CELL_DP) {
+            float byHeight = (hDp - CHROME_H_DP) / H;
+            float cell = Math.min(maxCell, Math.min(byHeight, bySideWidth));
+            return new CanvasPlan(cellToPx(Math.max(MIN_CELL_DP, cell), d), true);
+        }
+        float byStackWidth = (wDp - STACK_EXTRA_W_DP) / W;
+        return new CanvasPlan(cellToPx(Math.max(MIN_CELL_DP, Math.min(14f, byStackWidth)), d), false);
+    }
+
+    /** Whole dp, rounded DOWN to whole px, so the canvas never ends up taller than planned. */
+    private static int cellToPx(float dp, float density) {
+        return Math.max(1, (int) Math.floor((double) ((float) Math.floor(dp) * density)));
     }
 
     // ------------------------------------------------------------------

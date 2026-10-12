@@ -120,6 +120,7 @@ public final class CapePauseOverlay {
     static final int C_MUTED = 0xFF8E9BA6;
     static final int C_DANGER = 0xFFFF7A7A;
     static final int C_FIELD = 0xFF0F1318;
+    static final int C_LOCKED = 0xFF0C1014; // canvas cells that can not be painted (outside the two faces)
 
     // ------------------------------------------------------------------
     // Public API - called from C++ through JNI
@@ -201,7 +202,7 @@ public final class CapePauseOverlay {
             sToastShown = true;
             logFile("game activity found: " + a.getClass().getName());
             try {
-                Toast.makeText(a, "Custom Cape aktif - buka pause menu", Toast.LENGTH_LONG).show();
+                Toast.makeText(a, "Custom Cape ready - open the pause menu", Toast.LENGTH_LONG).show();
             } catch (Throwable ignored) {
             }
         }
@@ -213,7 +214,8 @@ public final class CapePauseOverlay {
         }
         // One line whenever any of the launcher's screen flags changes. If these
         // never change while playing, the launcher's hooks did not resolve.
-        String flags = "pause=" + paused + " hud=" + callBool(sHudMethod) + " menu=" + callBool(sMenuMethod);
+        String flags = "pause=" + paused + " hud=" + callBool(sHudMethod) + " menu=" + callBool(sMenuMethod)
+                + " focus=" + a.hasWindowFocus() + " card=" + (sUi != null && sUi.isAttached());
         if (!flags.equals(sLastFlags)) {
             sLastFlags = flags;
             logFile("flags: " + flags);
@@ -225,7 +227,15 @@ public final class CapePauseOverlay {
         }
 
         if (paused && sPauseStreak >= 2) { // ~240ms debounce so it never flashes
-            if (sUi == null) sUi = new Ui(a);
+            if (sUi == null) {
+                try {
+                    sUi = new Ui(a);
+                } catch (Throwable t) {
+                    // a broken panel must never retry 8x per second
+                    logFile("panel build failed: " + t);
+                    return 3000L;
+                }
+            }
             sUi.setShown(true);
         } else if (!paused && sUi != null) {
             sUi.setShown(false);
@@ -440,7 +450,11 @@ public final class CapePauseOverlay {
         }
     }
 
-    /** The pixel grid. Draws the model and applies pen / eraser / fill from touch. */
+    /**
+     * The pixel grid. Draws the model and applies pen / eraser / fill from touch.
+     * Only the two cape faces can be painted; everything else is drawn dark and
+     * locked, and a stroke stays inside the face it started in.
+     */
     static final class PixelView extends View {
         static final int TOOL_PEN = 0;
         static final int TOOL_ERASER = 1;
@@ -453,13 +467,15 @@ public final class CapePauseOverlay {
 
         private int lastX = -1;
         private int lastY = -1;
+        private int[] strokeFace;        // face the current stroke began in (null = not on a face yet)
+        private boolean strokeSnapshot;  // undo snapshot already taken for this stroke
         private final Paint fillP = new Paint();
         private final Paint lineP = new Paint();
 
         PixelView(Context c, CapeEditorModel model, int cellPx) {
             super(c);
             this.model = model;
-            this.cell = cellPx;
+            this.cell = Math.max(1, cellPx);
             lineP.setStyle(Paint.Style.STROKE);
         }
 
@@ -468,10 +484,18 @@ public final class CapePauseOverlay {
         }
 
         @Override protected void onDraw(Canvas cv) {
+            final int w = CapeEditorModel.W;
+            final int h = CapeEditorModel.H;
             fillP.setStyle(Paint.Style.FILL);
-            for (int y = 0; y < CapeEditorModel.H; y++) {
-                for (int x = 0; x < CapeEditorModel.W; x++) {
-                    int c = model.px[y * CapeEditorModel.W + x];
+
+            // Everything outside the two faces is locked: flat dark, never painted.
+            fillP.setColor(C_LOCKED);
+            cv.drawRect(0, 0, w * cell, h * cell, fillP);
+
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    if (!CapeEditorModel.isPaintable(x, y)) continue;
+                    int c = model.px[y * w + x];
                     float l = x * cell;
                     float t = y * cell;
                     if ((c >>> 24) != 255) { // transparent or translucent: checkerboard underneath
@@ -484,65 +508,126 @@ public final class CapePauseOverlay {
                     }
                 }
             }
-            // faint grid
+
+            // faint grid, inside the faces only
             lineP.setStrokeWidth(1f);
             lineP.setColor(0x22FFFFFF);
-            for (int x = 0; x <= CapeEditorModel.W; x++) {
-                cv.drawLine(x * cell, 0, x * cell, CapeEditorModel.H * cell, lineP);
-            }
-            for (int y = 0; y <= CapeEditorModel.H; y++) {
-                cv.drawLine(0, y * cell, CapeEditorModel.W * cell, y * cell, lineP);
-            }
-            // outer face (green) and inner face (white)
+            drawGrid(cv, CapeEditorModel.OUTER);
+            drawGrid(cv, CapeEditorModel.INNER);
+
+            // borders: outer face (green) and inner face (white)
             lineP.setStrokeWidth(Math.max(2f, cell / 6f));
             lineP.setColor(0xCC4AE0A0);
-            cv.drawRect(CapeEditorModel.OUTER[0] * cell, CapeEditorModel.OUTER[1] * cell,
-                    (CapeEditorModel.OUTER[0] + CapeEditorModel.OUTER[2]) * cell,
-                    (CapeEditorModel.OUTER[1] + CapeEditorModel.OUTER[3]) * cell, lineP);
+            drawBox(cv, CapeEditorModel.OUTER);
             lineP.setColor(0x88FFFFFF);
-            cv.drawRect(CapeEditorModel.INNER[0] * cell, CapeEditorModel.INNER[1] * cell,
-                    (CapeEditorModel.INNER[0] + CapeEditorModel.INNER[2]) * cell,
-                    (CapeEditorModel.INNER[1] + CapeEditorModel.INNER[3]) * cell, lineP);
+            drawBox(cv, CapeEditorModel.INNER);
+        }
+
+        private void drawGrid(Canvas cv, int[] r) {
+            float left = r[0] * cell;
+            float top = r[1] * cell;
+            float right = (r[0] + r[2]) * cell;
+            float bottom = (r[1] + r[3]) * cell;
+            for (int x = r[0]; x <= r[0] + r[2]; x++) cv.drawLine(x * cell, top, x * cell, bottom, lineP);
+            for (int y = r[1]; y <= r[1] + r[3]; y++) cv.drawLine(left, y * cell, right, y * cell, lineP);
+        }
+
+        private void drawBox(Canvas cv, int[] r) {
+            cv.drawRect(r[0] * cell, r[1] * cell, (r[0] + r[2]) * cell, (r[1] + r[3]) * cell, lineP);
+        }
+
+        private int cellAt(float v, int count) {
+            int c = (int) (v / cell);
+            return Math.max(0, Math.min(count - 1, c));
         }
 
         @Override public boolean onTouchEvent(MotionEvent e) {
-            int x = (int) (e.getX() / cell);
-            int y = (int) (e.getY() / cell);
-            x = Math.max(0, Math.min(CapeEditorModel.W - 1, x));
-            y = Math.max(0, Math.min(CapeEditorModel.H - 1, y));
+            int x = cellAt(e.getX(), CapeEditorModel.W);
+            int y = cellAt(e.getY(), CapeEditorModel.H);
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
+                    // drawing must never be mistaken for a scroll of the card
                     if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
-                    model.snapshot();
+                    strokeFace = CapeEditorModel.faceAt(x, y);
+                    strokeSnapshot = false;
+                    lastX = -1;
+                    lastY = -1;
                     if (tool == TOOL_FILL) {
-                        model.fill(x, y, color);
-                        lastX = -1;
-                        lastY = -1;
+                        if (strokeFace != null) {
+                            snapshotOnce();
+                            model.fill(x, y, color);
+                            invalidate();
+                        }
                     } else {
-                        model.line(x, y, x, y, tool == TOOL_ERASER ? 0 : color);
-                        lastX = x;
-                        lastY = y;
+                        stroke(x, y);
                     }
-                    invalidate();
                     return true;
                 case MotionEvent.ACTION_MOVE:
-                    if (tool != TOOL_FILL && (x != lastX || y != lastY)) {
-                        int fx = lastX < 0 ? x : lastX;
-                        int fy = lastY < 0 ? y : lastY;
-                        model.line(fx, fy, x, y, tool == TOOL_ERASER ? 0 : color);
-                        lastX = x;
-                        lastY = y;
-                        invalidate();
-                    }
+                    if (tool != TOOL_FILL && (x != lastX || y != lastY)) stroke(x, y);
                     return true;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
                     lastX = -1;
                     lastY = -1;
+                    strokeFace = null;
                     return true;
                 default:
                     return true;
             }
+        }
+
+        /**
+         * Pen / eraser. Paints only inside the face where the stroke began, so a
+         * colour can never cross a border. A stroke that begins on an edge strip
+         * or in the gap starts as soon as the finger reaches a face.
+         */
+        private void stroke(int x, int y) {
+            if (strokeFace == null) {
+                strokeFace = CapeEditorModel.faceAt(x, y);
+                if (strokeFace == null) return;
+                lastX = -1;
+                lastY = -1;
+            }
+            snapshotOnce();
+            int fromX = lastX < 0 ? x : lastX;
+            int fromY = lastY < 0 ? y : lastY;
+            model.line(fromX, fromY, x, y, tool == TOOL_ERASER ? 0 : color, strokeFace);
+            lastX = x;
+            lastY = y;
+            invalidate();
+        }
+
+        /** One undo step per stroke, and none for a stroke that never touched a face. */
+        private void snapshotOnce() {
+            if (!strokeSnapshot) {
+                strokeSnapshot = true;
+                model.snapshot();
+            }
+        }
+    }
+
+    /** ScrollView that never grows taller than maxHeightPx, so the card always fits on the screen. */
+    static final class MaxHeightScroll extends ScrollView {
+        private int maxHeightPx = Integer.MAX_VALUE;
+
+        MaxHeightScroll(Context c) {
+            super(c);
+        }
+
+        void setMaxHeightPx(int px) {
+            if (px != maxHeightPx) {
+                maxHeightPx = px;
+                requestLayout();
+            }
+        }
+
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            int mode = MeasureSpec.getMode(heightSpec);
+            int size = MeasureSpec.getSize(heightSpec);
+            if (mode == MeasureSpec.UNSPECIFIED || size > maxHeightPx) {
+                heightSpec = MeasureSpec.makeMeasureSpec(maxHeightPx, MeasureSpec.AT_MOST);
+            }
+            super.onMeasure(widthSpec, heightSpec);
         }
     }
 
@@ -577,16 +662,24 @@ public final class CapePauseOverlay {
         private final float density;
 
         private LinearLayout card;
+        private MaxHeightScroll scroll;
+        private LinearLayout content;
         private LinearLayout menuBox;
         private LinearLayout listBox;
-        private LinearLayout listItems;
         private LinearLayout canvasBox;
+        private LinearLayout footerList;
+        private LinearLayout footerCanvas;
         private TextView activeText;
         private TextView msgText;
         private Glyph chevron;
         private PixelView pixelView;
         private final View[] swatches = new View[PALETTE.length];
         private final TextView[] toolButtons = new TextView[3];
+        private int curColor = 0xFFFFFFFF;
+        private int curTool = PixelView.TOOL_PEN;
+        private int builtW;
+        private int builtH;
+        private int lastMaxHeight = -1;
 
         private WindowManager.LayoutParams lp;
         private boolean attached;
@@ -600,6 +693,7 @@ public final class CapePauseOverlay {
         private Dialog dialog;
         private long nextAttachTry;
         private int attachFailLogs;
+        private boolean attachLogged;
 
         Ui(Activity a) {
             activity = a;
@@ -612,7 +706,7 @@ public final class CapePauseOverlay {
             posY = prefs.getInt("y", dp(12));
             collapsed = prefs.getBoolean("collapsed", false);
             build();
-            tryAttach();
+            // not attached yet: setShown(true) does that, and only while the pause menu is open
         }
 
         // ---- sizes -------------------------------------------------------
@@ -659,6 +753,16 @@ public final class CapePauseOverlay {
             return b;
         }
 
+        /** Smaller button for the toolbar and the pinned footers. style: 0 normal, 1 accent, 2 danger */
+        private TextView compactButton(String text, int style, Runnable onClick) {
+            TextView b = button(text, style, onClick);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12f));
+            b.setPadding(dp(6), dp(7), dp(6), dp(7));
+            b.setMinHeight(dp(34));
+            b.setSingleLine(true);
+            return b;
+        }
+
         private LinearLayout row() {
             LinearLayout r = new LinearLayout(activity);
             r.setOrientation(LinearLayout.HORIZONTAL);
@@ -679,7 +783,7 @@ public final class CapePauseOverlay {
             card.setBackground(round(C_CARD, dp(16), C_CARD_EDGE, Math.max(1, dp(1))));
             card.setMinimumWidth(dp(250));
 
-            // header = drag handle
+            // header = drag handle (it never scrolls)
             LinearLayout header = row();
             header.setGravity(Gravity.CENTER_VERTICAL);
             header.setPadding(dp(2), dp(2), dp(2), dp(6));
@@ -701,25 +805,67 @@ public final class CapePauseOverlay {
             card.addView(header, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            // status
-            activeText = label("Memuat...", 12f, C_MUTED, false);
-            card.addView(activeText);
+            // The middle part scrolls when the screen is too short for it.
+            scroll = new MaxHeightScroll(activity);
+            scroll.setVerticalScrollBarEnabled(true);
+            scroll.setScrollbarFadingEnabled(false); // always show the bar when there is more to scroll
+            scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+            content = new LinearLayout(activity);
+            content.setOrientation(LinearLayout.VERTICAL);
+            scroll.addView(content, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            card.addView(scroll, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            activeText = label("Loading...", 12f, C_MUTED, false);
+            content.addView(activeText);
+
+            buildMenu();
+            buildList();
+            buildCanvas();
+            content.addView(menuBox);
+            content.addView(listBox);
+            content.addView(canvasBox);
+
+            // Status line: pinned below the scrolling part so feedback is always visible.
             msgText = label("", 12f, C_MUTED, false);
             msgText.setMaxLines(3);
             msgText.setEllipsize(TextUtils.TruncateAt.END);
             msgText.setMaxWidth(dp(330));
             msgText.setVisibility(View.GONE);
             LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            mlp.topMargin = dp(3);
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            mlp.topMargin = dp(6);
             card.addView(msgText, mlp);
 
-            buildMenu();
-            buildList();
-            buildCanvas();
-            card.addView(menuBox);
-            card.addView(listBox);
-            card.addView(canvasBox);
+            // Pinned buttons of the list / canvas screens (always reachable, never scrolled away).
+            footerList = row();
+            footerList.addView(compactButton("Back", 0, new Runnable() {
+                @Override public void run() {
+                    setMode(MODE_MENU);
+                }
+            }), weighted(2));
+            LinearLayout.LayoutParams f1 = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            f1.topMargin = dp(4);
+            card.addView(footerList, f1);
+
+            footerCanvas = row();
+            footerCanvas.addView(compactButton("Close", 0, new Runnable() {
+                @Override public void run() {
+                    setMode(MODE_MENU);
+                }
+            }), weighted(2));
+            footerCanvas.addView(compactButton("Save", 1, new Runnable() {
+                @Override public void run() {
+                    saveDrawing();
+                }
+            }), weighted(2));
+            LinearLayout.LayoutParams f2 = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            f2.topMargin = dp(4);
+            card.addView(footerCanvas, f2);
+
             applyMode();
         }
 
@@ -729,12 +875,12 @@ public final class CapePauseOverlay {
             menuBox.setPadding(0, dp(6), 0, 0);
 
             LinearLayout r1 = row();
-            r1.addView(button("Pilih Cape", 1, new Runnable() {
+            r1.addView(button("Select Cape", 1, new Runnable() {
                 @Override public void run() {
                     showList();
                 }
             }), weighted(3));
-            r1.addView(button("Lepas Cape", 2, new Runnable() {
+            r1.addView(button("Remove Cape", 2, new Runnable() {
                 @Override public void run() {
                     removeCape();
                 }
@@ -742,87 +888,80 @@ public final class CapePauseOverlay {
             menuBox.addView(r1);
 
             LinearLayout r2 = row();
-            r2.addView(button("Tempel Link", 0, new Runnable() {
+            r2.addView(button("Paste Link", 0, new Runnable() {
                 @Override public void run() {
                     showLinkDialog();
                 }
             }), weighted(3));
             r2.addView(button("Canvas", 0, new Runnable() {
                 @Override public void run() {
-                    setMode(MODE_CANVAS);
+                    showCanvas();
                 }
             }), weighted(3));
             menuBox.addView(r2);
         }
 
         private void buildList() {
+            // The card's own scroll area scrolls this list; its Back button is pinned (footerList).
             listBox = new LinearLayout(activity);
             listBox.setOrientation(LinearLayout.VERTICAL);
             listBox.setPadding(0, dp(6), 0, 0);
-
-            ScrollView sv = new ScrollView(activity);
-            listItems = new LinearLayout(activity);
-            listItems.setOrientation(LinearLayout.VERTICAL);
-            sv.addView(listItems, new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            listBox.addView(sv, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(150)));
-
-            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            blp.topMargin = dp(6);
-            listBox.addView(button("Kembali", 0, new Runnable() {
-                @Override public void run() {
-                    setMode(MODE_MENU);
-                }
-            }), blp);
         }
 
+        /** Builds the canvas screen for the current display size (also used to rebuild it if the size changes). */
         private void buildCanvas() {
+            DisplayMetrics dm = activity.getResources().getDisplayMetrics();
+            builtW = dm.widthPixels;
+            builtH = dm.heightPixels;
+            CapeEditorModel.CanvasPlan plan = CapeEditorModel.planCanvas(builtW, builtH, density);
+            logFile("canvas layout: cell=" + plan.cellPx + "px sideBySide=" + plan.sideBySide
+                    + " screen=" + builtW + "x" + builtH + " density=" + density);
+            final int cell = plan.cellPx;
+            final int canvasW = cell * CapeEditorModel.W;
+            final int canvasH = cell * CapeEditorModel.H;
+
             canvasBox = new LinearLayout(activity);
             canvasBox.setOrientation(LinearLayout.VERTICAL);
             canvasBox.setPadding(0, dp(4), 0, 0);
 
-            // pick a cell size that fits this screen
-            DisplayMetrics dm = activity.getResources().getDisplayMetrics();
-            int byHeight = (int) ((dm.heightPixels * 0.86f - dp(150)) / CapeEditorModel.H);
-            int byWidth = (int) ((dm.widthPixels * 0.94f - dp(150)) / CapeEditorModel.W);
-            int cell = Math.max(dp(7), Math.min(dp(15), Math.min(byHeight, byWidth)));
-
-            TextView hint = label("Hijau = sisi luar, putih = sisi dalam (disalin otomatis kalau kosong)",
-                    11f, C_MUTED, false);
-            hint.setMaxWidth(cell * CapeEditorModel.W + dp(150));
+            TextView hint = label("Green = outside, White = inside (auto-copied if empty)", 11f, C_MUTED, false);
+            hint.setMaxWidth(plan.sideBySide ? canvasW + dp(10 + 156) : canvasW);
             canvasBox.addView(hint);
 
-            LinearLayout body = row();
+            LinearLayout body = new LinearLayout(activity);
+            body.setOrientation(plan.sideBySide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
             LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             bp.topMargin = dp(6);
             canvasBox.addView(body, bp);
 
             pixelView = new PixelView(activity, sModel, cell);
-            body.addView(pixelView, new LinearLayout.LayoutParams(
-                    cell * CapeEditorModel.W, cell * CapeEditorModel.H));
+            pixelView.color = curColor;
+            pixelView.tool = curTool;
+            body.addView(pixelView, new LinearLayout.LayoutParams(canvasW, canvasH));
 
             LinearLayout side = new LinearLayout(activity);
             side.setOrientation(LinearLayout.VERTICAL);
-            LinearLayout.LayoutParams sp0 = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            sp0.leftMargin = dp(10);
-            body.addView(side, sp0);
+            if (plan.sideBySide) sideLp.leftMargin = dp(10);
+            else sideLp.topMargin = dp(8);
+            body.addView(side, sideLp);
 
-            // palette: 4 columns
-            int sw = dp(26);
-            for (int r = 0; r < PALETTE.length / 4; r++) {
+            // palette: 6 columns beside the canvas, 8 columns below it
+            final int cols = plan.sideBySide ? 6 : 8;
+            final int sw = dp(22);
+            for (int r = 0; r * cols < PALETTE.length; r++) {
                 LinearLayout pr = row();
-                for (int c = 0; c < 4; c++) {
-                    final int idx = r * 4 + c;
+                for (int c = 0; c < cols && r * cols + c < PALETTE.length; c++) {
+                    final int idx = r * cols + c;
                     View v = new View(activity);
                     v.setClickable(true);
                     v.setOnClickListener(new View.OnClickListener() {
                         @Override public void onClick(View x) {
-                            pixelView.color = PALETTE[idx];
-                            if (pixelView.tool == PixelView.TOOL_ERASER) selectTool(PixelView.TOOL_PEN);
+                            curColor = PALETTE[idx];
+                            if (pixelView != null) pixelView.color = curColor;
+                            if (curTool == PixelView.TOOL_ERASER) selectTool(PixelView.TOOL_PEN);
                             refreshSwatches();
                         }
                     });
@@ -837,17 +976,17 @@ public final class CapePauseOverlay {
 
             // tools
             LinearLayout t1 = row();
-            toolButtons[PixelView.TOOL_PEN] = smallButton("Pena", new Runnable() {
+            toolButtons[PixelView.TOOL_PEN] = compactButton("Pen", 0, new Runnable() {
                 @Override public void run() {
                     selectTool(PixelView.TOOL_PEN);
                 }
             });
-            toolButtons[PixelView.TOOL_ERASER] = smallButton("Hapus", new Runnable() {
+            toolButtons[PixelView.TOOL_ERASER] = compactButton("Erase", 0, new Runnable() {
                 @Override public void run() {
                     selectTool(PixelView.TOOL_ERASER);
                 }
             });
-            toolButtons[PixelView.TOOL_FILL] = smallButton("Isi", new Runnable() {
+            toolButtons[PixelView.TOOL_FILL] = compactButton("Fill", 0, new Runnable() {
                 @Override public void run() {
                     selectTool(PixelView.TOOL_FILL);
                 }
@@ -857,59 +996,57 @@ public final class CapePauseOverlay {
             t1.addView(toolButtons[2], weighted(2));
             LinearLayout.LayoutParams t1p = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            t1p.topMargin = dp(6);
+            t1p.topMargin = dp(4);
             side.addView(t1, t1p);
-            selectTool(PixelView.TOOL_PEN);
+            selectTool(curTool);
 
             LinearLayout t2 = row();
-            t2.addView(smallButton("Undo", new Runnable() {
+            t2.addView(compactButton("Undo", 0, new Runnable() {
                 @Override public void run() {
                     sModel.undo();
                     pixelView.invalidate();
                 }
             }), weighted(2));
-            t2.addView(smallButton("Bersih", new Runnable() {
+            t2.addView(compactButton("Clear", 0, new Runnable() {
                 @Override public void run() {
                     sModel.clear();
                     pixelView.invalidate();
                 }
             }), weighted(2));
             side.addView(t2);
-
-            LinearLayout t3 = row();
-            t3.addView(button("Simpan", 1, new Runnable() {
-                @Override public void run() {
-                    saveDrawing();
-                }
-            }), weighted(2));
-            t3.addView(button("Tutup", 0, new Runnable() {
-                @Override public void run() {
-                    setMode(MODE_MENU);
-                }
-            }), weighted(2));
-            side.addView(t3);
         }
 
-        private TextView smallButton(String text, Runnable r) {
-            TextView b = button(text, 0, r);
-            b.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12f));
-            b.setPadding(dp(6), dp(8), dp(6), dp(8));
-            b.setMinHeight(dp(34));
-            b.setMinWidth(dp(46));
-            return b;
+        /** Called whenever the card is about to be shown: rebuilds the canvas if the screen size changed. */
+        private void rebuildCanvasIfScreenChanged() {
+            DisplayMetrics dm = activity.getResources().getDisplayMetrics();
+            if (dm.widthPixels == builtW && dm.heightPixels == builtH) return;
+            try {
+                int idx = content.indexOfChild(canvasBox);
+                content.removeView(canvasBox);
+                buildCanvas(); // also records the new size, so a failure is not retried on every tick
+                content.addView(canvasBox, Math.max(0, idx));
+                applyMode();
+            } catch (Throwable t) {
+                builtW = dm.widthPixels;
+                builtH = dm.heightPixels;
+                logFile("canvas relayout failed: " + t);
+            }
         }
 
         private void refreshSwatches() {
             for (int i = 0; i < swatches.length; i++) {
-                boolean sel = pixelView != null && PALETTE[i] == pixelView.color;
-                swatches[i].setBackground(round(PALETTE[i], dp(6), sel ? 0xFFFFFFFF : 0x44FFFFFF,
+                if (swatches[i] == null) continue;
+                boolean sel = PALETTE[i] == curColor;
+                swatches[i].setBackground(round(PALETTE[i], dp(5), sel ? 0xFFFFFFFF : 0x44FFFFFF,
                         sel ? Math.max(2, dp(2)) : Math.max(1, dp(1))));
             }
         }
 
         private void selectTool(int tool) {
-            pixelView.tool = tool;
+            curTool = tool;
+            if (pixelView != null) pixelView.tool = tool;
             for (int i = 0; i < toolButtons.length; i++) {
+                if (toolButtons[i] == null) continue;
                 boolean on = i == tool;
                 toolButtons[i].setBackground(on
                         ? pressable(C_ACCENT, C_ACCENT_DOWN, dp(10))
@@ -939,7 +1076,10 @@ public final class CapePauseOverlay {
                 wm.addView(card, lp);
                 viaWindow = true;
                 attached = true;
-                logFile("card attached as window");
+                if (!attachLogged) {
+                    attachLogged = true;
+                    logFile("card attached as window (it is removed again when the pause menu closes)");
+                }
                 return true;
             } catch (Throwable t) {
                 if (attachFailLogs++ < 4) logFile("window attach failed (" + t + "), trying content view");
@@ -956,7 +1096,10 @@ public final class CapePauseOverlay {
                 content.addView(card, fp);
                 viaWindow = false;
                 attached = true;
-                logFile("card attached to content view");
+                if (!attachLogged) {
+                    attachLogged = true;
+                    logFile("card attached to content view");
+                }
                 return true;
             } catch (Throwable t) {
                 if (attachFailLogs++ < 4) logFile("content attach failed: " + t);
@@ -964,8 +1107,13 @@ public final class CapePauseOverlay {
             }
         }
 
+        boolean isAttached() {
+            return attached;
+        }
+
         void detach() {
             dismissDialog();
+            shown = false;
             if (!attached) return;
             attached = false;
             try {
@@ -978,7 +1126,16 @@ public final class CapePauseOverlay {
             }
         }
 
+        /**
+         * true: attach the card and show it. false: take it out of the game's
+         * window hierarchy completely, so while you play (HUD, inventory, chat...)
+         * nothing of this mod is attached to the game window at all.
+         */
         void setShown(boolean s) {
+            if (!s) {
+                if (attached) detach();
+                return;
+            }
             if (!attached) {
                 long now = android.os.SystemClock.uptimeMillis();
                 if (now < nextAttachTry) return;
@@ -987,15 +1144,13 @@ public final class CapePauseOverlay {
                     return;
                 }
             }
-            if (shown == s) return;
-            shown = s;
-            card.setVisibility(s ? View.VISIBLE : View.GONE);
-            if (s) {
-                refreshActive();
-                clampAfterLayout();
-            } else {
-                dismissDialog();
-            }
+            if (shown) return;
+            shown = true;
+            rebuildCanvasIfScreenChanged();
+            card.setVisibility(View.VISIBLE);
+            applyMaxHeight();
+            refreshActive();
+            clampAfterLayout();
         }
 
         // ---- dragging -----------------------------------------------------------
@@ -1095,13 +1250,37 @@ public final class CapePauseOverlay {
         }
 
         private void applyMode() {
-            int body = collapsed ? View.GONE : View.VISIBLE;
-            activeText.setVisibility(body);
-            if (collapsed) msgText.setVisibility(View.GONE);
-            menuBox.setVisibility(!collapsed && mode == MODE_MENU ? View.VISIBLE : View.GONE);
-            listBox.setVisibility(!collapsed && mode == MODE_LIST ? View.VISIBLE : View.GONE);
-            canvasBox.setVisibility(!collapsed && mode == MODE_CANVAS ? View.VISIBLE : View.GONE);
-            if (!collapsed && mode == MODE_CANVAS && pixelView != null) pixelView.invalidate();
+            boolean open = !collapsed;
+            scroll.setVisibility(open ? View.VISIBLE : View.GONE);
+            activeText.setVisibility(open && mode != MODE_CANVAS ? View.VISIBLE : View.GONE);
+            menuBox.setVisibility(open && mode == MODE_MENU ? View.VISIBLE : View.GONE);
+            listBox.setVisibility(open && mode == MODE_LIST ? View.VISIBLE : View.GONE);
+            canvasBox.setVisibility(open && mode == MODE_CANVAS ? View.VISIBLE : View.GONE);
+            footerList.setVisibility(open && mode == MODE_LIST ? View.VISIBLE : View.GONE);
+            footerCanvas.setVisibility(open && mode == MODE_CANVAS ? View.VISIBLE : View.GONE);
+            msgText.setVisibility(open && msgText.getText().length() > 0 ? View.VISIBLE : View.GONE);
+            scroll.scrollTo(0, 0);
+            applyMaxHeight();
+            if (open && mode == MODE_CANVAS && pixelView != null) pixelView.invalidate();
+        }
+
+        /** The scrolling part may use whatever the pinned parts and the screen margins leave over. */
+        private void applyMaxHeight() {
+            int screenH = activity.getResources().getDisplayMetrics().heightPixels;
+            boolean footer = !collapsed && (mode == MODE_LIST || mode == MODE_CANVAS);
+            boolean status = !collapsed && msgText.getVisibility() == View.VISIBLE;
+            int reserved = dp(16)                  // 8dp free above and below the card
+                    + dp(18)                       // card padding
+                    + dp(36)                       // header
+                    + (footer ? dp(48) : 0)        // pinned Back / Close + Save row
+                    + (status ? dp(48) : 0);       // pinned status line (up to 3 lines)
+            int max = Math.max(dp(90), screenH - reserved);
+            scroll.setMaxHeightPx(max);
+            if (max != lastMaxHeight) {
+                lastMaxHeight = max;
+                logFile("scroll area max height " + Math.round(max / density) + "dp (screen "
+                        + Math.round(screenH / density) + "dp)");
+            }
         }
 
         // ---- status ------------------------------------------------------------------
@@ -1113,6 +1292,7 @@ public final class CapePauseOverlay {
             msgText.setTextColor(err ? C_DANGER : ok ? C_ACCENT : C_MUTED);
             msgText.setText(text);
             msgText.setVisibility(text.length() == 0 || collapsed ? View.GONE : View.VISIBLE);
+            applyMaxHeight();
         }
 
         private void refreshActive() {
@@ -1124,7 +1304,7 @@ public final class CapePauseOverlay {
                 @Override void finish(Ui ui, String result) {
                     ui.activeName = result == null ? "" : result;
                     ui.activeText.setText(ui.activeName.length() == 0
-                            ? "Belum ada cape aktif" : "Aktif: " + ui.activeName);
+                            ? "No cape selected" : "Active: " + ui.activeName);
                 }
             });
         }
@@ -1154,10 +1334,15 @@ public final class CapePauseOverlay {
         }
 
         // ---- actions ---------------------------------------------------------------------
+        private void showCanvas() {
+            setStatus("");
+            setMode(MODE_CANVAS);
+        }
+
         private void showList() {
             setMode(MODE_LIST);
-            listItems.removeAllViews();
-            listItems.addView(label("Memuat daftar...", 12f, C_MUTED, false));
+            listBox.removeAllViews();
+            listBox.addView(label("Loading list...", 12f, C_MUTED, false));
             run(new Job() {
                 @Override String work() {
                     return nativeListCapes();
@@ -1170,12 +1355,12 @@ public final class CapePauseOverlay {
         }
 
         private void fillList(String names) {
-            listItems.removeAllViews();
+            listBox.removeAllViews();
             String[] parts = (names == null || names.length() == 0) ? new String[0] : names.split("\n");
             if (parts.length == 0) {
-                TextView empty = label("Belum ada cape. Pakai Tempel Link atau Canvas.", 12f, C_MUTED, false);
+                TextView empty = label("No capes yet. Use Paste Link or Canvas.", 12f, C_MUTED, false);
                 empty.setPadding(dp(4), dp(8), dp(4), dp(8));
-                listItems.addView(empty);
+                listBox.addView(empty);
                 return;
             }
             for (int i = 0; i < parts.length; i++) {
@@ -1198,12 +1383,12 @@ public final class CapePauseOverlay {
                 LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 rp.bottomMargin = dp(2);
-                listItems.addView(row, rp);
+                listBox.addView(row, rp);
             }
         }
 
         private void equip(final String name) {
-            setStatus("Memasang " + name + "...");
+            setStatus("Selecting " + name + "...");
             run(new Job() {
                 @Override String work() {
                     return nativeEquip(name);
@@ -1232,12 +1417,12 @@ public final class CapePauseOverlay {
 
         private void saveDrawing() {
             if (sModel.isEmpty()) {
-                setStatus("ERR: Canvas masih kosong.");
+                setStatus("ERR: Canvas is empty.");
                 return;
             }
             final byte[] rgba = sModel.toRgba();
-            final String name = "Gambar" + new SimpleDateFormat("MMddHHmmss", Locale.US).format(new Date());
-            setStatus("Menyimpan...");
+            final String name = "Drawing" + new SimpleDateFormat("MMddHHmmss", Locale.US).format(new Date());
+            setStatus("Saving...");
             run(new Job() {
                 @Override String work() {
                     return nativeSaveDrawn(rgba, CapeEditorModel.TEX_W, CapeEditorModel.TEX_H, name);
@@ -1255,10 +1440,10 @@ public final class CapePauseOverlay {
         private void importFromText(String raw) {
             final String src = raw == null ? "" : raw.trim();
             if (src.length() == 0) {
-                setStatus("ERR: Link kosong.");
+                setStatus("ERR: Link is empty.");
                 return;
             }
-            setStatus("Mengunduh cape...");
+            setStatus("Downloading cape...");
             final File cache = new File(activity.getApplicationContext().getCacheDir(), "customcape_dl");
             run(new Job() {
                 @Override String work() {
@@ -1267,12 +1452,12 @@ public final class CapePauseOverlay {
                         if (png == null) {
                             String why = CapeDownloadHelper.lastError;
                             return "ERR: " + (why == null || why.length() == 0
-                                    ? "Gagal mengunduh. Cek link dan internet." : why);
+                                    ? "Download failed. Check the link and your internet." : why);
                         }
                         return nativeImportPng(png, CapeEditorModel.nameFromUrl(src));
                     }
                     File f = new File(src);
-                    if (!f.isFile()) return "ERR: File tidak ditemukan.";
+                    if (!f.isFile()) return "ERR: File not found.";
                     return nativeImportPng(f.getAbsolutePath(), CapeEditorModel.nameFromPath(src));
                 }
 
@@ -1317,8 +1502,8 @@ public final class CapePauseOverlay {
             box.setPadding(dp(18), dp(16), dp(18), dp(14));
             box.setBackground(round(0xFF161A1F, dp(18), C_CARD_EDGE, Math.max(1, dp(1))));
 
-            box.addView(label("Tempel link cape", 16f, C_TEXT, true));
-            TextView hint = label("Link Bedrock Cosmos (.zip atau .png), atau path file di HP.", 12f, C_MUTED, false);
+            box.addView(label("Paste cape link", 16f, C_TEXT, true));
+            TextView hint = label("Bedrock Cosmos link (.zip or .png), or a file path on this device.", 12f, C_MUTED, false);
             LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             hp.topMargin = dp(4);
@@ -1329,7 +1514,7 @@ public final class CapePauseOverlay {
             input.setSingleLine(true);
             input.setTextColor(C_TEXT);
             input.setHintTextColor(C_MUTED);
-            input.setHint("https://capes.bedrock-cosmos.app/zips/nama.zip");
+            input.setHint("https://capes.bedrock-cosmos.app/zips/name.zip");
             input.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13f));
             input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
             input.setImeOptions(EditorInfo.IME_ACTION_DONE);
@@ -1347,7 +1532,7 @@ public final class CapePauseOverlay {
             LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             bp.topMargin = dp(12);
-            buttons.addView(button("Tempel", 0, new Runnable() {
+            buttons.addView(button("Paste", 0, new Runnable() {
                 @Override public void run() {
                     String c = clipboardText();
                     if (c.length() > 0) {
@@ -1356,7 +1541,7 @@ public final class CapePauseOverlay {
                     }
                 }
             }), weighted(3));
-            buttons.addView(button("Batal", 0, new Runnable() {
+            buttons.addView(button("Cancel", 0, new Runnable() {
                 @Override public void run() {
                     dismissDialog();
                 }
