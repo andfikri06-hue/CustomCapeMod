@@ -53,12 +53,13 @@ jobs:
           set -e
           rm -rf build_java && mkdir -p build_java/classes
 
-          # Only these three files go into the dex. (CapeCanvasActivity.java is the
-          # old WebView canvas and is not used any more.)
+          # Only these two files go into the dex. (CapeCanvasActivity.java is the
+          # old WebView canvas and CapeDownloadHelper.java the removed link
+          # download - neither is used any more, so a stale copy in src/ is ignored.)
           javac -source 8 -target 8 -encoding UTF-8 -Xlint:-options \
             -bootclasspath "$ANDROID_JAR" \
             -d build_java/classes \
-            src/CapeEditorModel.java src/CapeDownloadHelper.java src/CapePauseOverlay.java
+            src/CapeEditorModel.java src/CapePauseOverlay.java
 
           # one jar, so the many CapePauseOverlay$...class files need no shell quoting
           jar cf build_java/classes.jar -C build_java/classes .
@@ -71,7 +72,6 @@ jobs:
           need = [
               b"Lorg/levimc/launcher/customcape/CapePauseOverlay;",
               b"Lorg/levimc/launcher/customcape/CapeEditorModel;",
-              b"Lorg/levimc/launcher/customcape/CapeDownloadHelper;",
           ]
           missing = [n.decode() for n in need if n not in data]
           print("classes.dex:", len(data), "bytes")
