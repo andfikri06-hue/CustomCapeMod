@@ -3,7 +3,7 @@
   "name": "CustomCapeMod",
   "type": "preload-native",
   "platform": "android",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Fikri",
-  "description": "Custom capes for LeviLauncher (LeviLaunchroid), Minecraft Bedrock 26.51. Panel muncul di pause menu: pilih cape, tempel link Bedrock Cosmos, atau gambar sendiri."
+  "description": "Adds custom capes for Minecraft."
 }
