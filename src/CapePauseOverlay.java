@@ -1,21 +1,17 @@
 package org.levimc.launcher.customcape;
 
 import android.app.Activity;
-import android.app.Dialog;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
-import android.graphics.drawable.ColorDrawable;
+import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.InputType;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
@@ -25,10 +21,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
-import android.view.Window;
 import android.view.WindowManager;
-import android.view.inputmethod.EditorInfo;
-import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -48,6 +41,7 @@ import java.util.concurrent.Executors;
 
 /**
  * Custom Cape UI that only exists while Minecraft's vanilla PAUSE MENU is open.
+ * Select / remove a cape, or draw one on a canvas (64x32 up to 640x320).
  *
  * Why this is Java instead of pl::modmenu buttons: LeviLaunchroid hides every
  * mod button / HUD draw command whenever the pause menu is open (it treats
@@ -81,6 +75,9 @@ public final class CapePauseOverlay {
     private static native String nativeActiveName();                      // "" if none
     private static native String nativeEquip(String name);
     private static native String nativeRemoveCape();
+    // Not used by the panel any more (the link / file import was removed). Still declared
+    // because the native side registers it: a registered method the class lacks would
+    // make RegisterNatives fail.
     private static native String nativeImportPng(String pngPath, String name);
     private static native String nativeSaveDrawn(byte[] rgba, int width, int height, String name);
 
@@ -88,7 +85,8 @@ public final class CapePauseOverlay {
     // State
     // ------------------------------------------------------------------
     private static final Object LOCK = new Object();
-    private static final CapeEditorModel sModel = new CapeEditorModel();
+    // The drawing. Replaced (not edited) when the resolution changes; main thread only.
+    private static CapeEditorModel sModel = new CapeEditorModel();
 
     private static Handler sMain;
     private static ExecutorService sIo;
@@ -454,6 +452,10 @@ public final class CapePauseOverlay {
      * The pixel grid. Draws the model and applies pen / eraser / fill from touch.
      * Only the two cape faces can be painted; everything else is drawn dark and
      * locked, and a stroke stays inside the face it started in.
+     *
+     * The model can have many cells (up to 220 x 170 at 640x320), so the painted
+     * cells are drawn from one small bitmap (one pixel per cell, scaled up without
+     * smoothing) instead of one rectangle per cell.
      */
     static final class PixelView extends View {
         static final int TOOL_PEN = 0;
@@ -464,6 +466,7 @@ public final class CapePauseOverlay {
         final int cell;
         int color = 0xFFFFFFFF;
         int tool = TOOL_PEN;
+        int brush = 1;                   // pen / eraser size, in cells
 
         private int lastX = -1;
         private int lastY = -1;
@@ -471,65 +474,78 @@ public final class CapePauseOverlay {
         private boolean strokeSnapshot;  // undo snapshot already taken for this stroke
         private final Paint fillP = new Paint();
         private final Paint lineP = new Paint();
+        private final Paint bmpP = new Paint();
+        private final Rect dst = new Rect();
+        private Bitmap bmp;
 
         PixelView(Context c, CapeEditorModel model, int cellPx) {
             super(c);
             this.model = model;
             this.cell = Math.max(1, cellPx);
             lineP.setStyle(Paint.Style.STROKE);
+            bmpP.setFilterBitmap(false); // crisp square cells
+            bmpP.setAntiAlias(false);
+            bmpP.setDither(false);
         }
 
         @Override protected void onMeasure(int wSpec, int hSpec) {
-            setMeasuredDimension(CapeEditorModel.W * cell, CapeEditorModel.H * cell);
+            setMeasuredDimension(model.w * cell, model.h * cell);
         }
 
         @Override protected void onDraw(Canvas cv) {
-            final int w = CapeEditorModel.W;
-            final int h = CapeEditorModel.H;
             fillP.setStyle(Paint.Style.FILL);
 
             // Everything outside the two faces is locked: flat dark, never painted.
             fillP.setColor(C_LOCKED);
-            cv.drawRect(0, 0, w * cell, h * cell, fillP);
+            cv.drawRect(0, 0, model.w * cell, model.h * cell, fillP);
 
-            for (int y = 0; y < h; y++) {
-                for (int x = 0; x < w; x++) {
-                    if (!CapeEditorModel.isPaintable(x, y)) continue;
-                    int c = model.px[y * w + x];
-                    float l = x * cell;
-                    float t = y * cell;
-                    if ((c >>> 24) != 255) { // transparent or translucent: checkerboard underneath
-                        fillP.setColor(((x + y) & 1) == 0 ? 0xFF2B333B : 0xFF222930);
-                        cv.drawRect(l, t, l + cell, t + cell, fillP);
-                    }
-                    if ((c >>> 24) != 0) {
-                        fillP.setColor(c);
-                        cv.drawRect(l, t, l + cell, t + cell, fillP);
-                    }
-                }
-            }
+            // transparent / translucent cells show a checkerboard (one square per standard 64x32 pixel)
+            drawChecker(cv, model.outer);
+            drawChecker(cv, model.inner);
 
-            // faint grid, inside the faces only
+            // the painted cells (locked cells are always transparent, so they stay dark)
+            if (bmp == null) bmp = Bitmap.createBitmap(model.w, model.h, Bitmap.Config.ARGB_8888);
+            bmp.setPixels(model.px, 0, model.w, 0, 0, model.w, model.h);
+            dst.set(0, 0, model.w * cell, model.h * cell);
+            cv.drawBitmap(bmp, null, dst, bmpP);
+
+            // faint grid, inside the faces only: every cell, or every standard pixel when cells are tiny
+            int step = cell >= 8 ? 1 : model.scale;
             lineP.setStrokeWidth(1f);
             lineP.setColor(0x22FFFFFF);
-            drawGrid(cv, CapeEditorModel.OUTER);
-            drawGrid(cv, CapeEditorModel.INNER);
+            drawGrid(cv, model.outer, step);
+            drawGrid(cv, model.inner, step);
 
             // borders: outer face (green) and inner face (white)
             lineP.setStrokeWidth(Math.max(2f, cell / 6f));
             lineP.setColor(0xCC4AE0A0);
-            drawBox(cv, CapeEditorModel.OUTER);
+            drawBox(cv, model.outer);
             lineP.setColor(0x88FFFFFF);
-            drawBox(cv, CapeEditorModel.INNER);
+            drawBox(cv, model.inner);
         }
 
-        private void drawGrid(Canvas cv, int[] r) {
+        private void drawChecker(Canvas cv, int[] r) {
+            final int s = model.scale;
+            final int tile = s * cell;
+            final int baseX = r[0] / s;
+            final int baseY = r[1] / s;
+            for (int ty = 0; ty < r[3] / s; ty++) {
+                for (int tx = 0; tx < r[2] / s; tx++) {
+                    fillP.setColor(((baseX + tx + baseY + ty) & 1) == 0 ? 0xFF2B333B : 0xFF222930);
+                    float l = r[0] * cell + tx * tile;
+                    float t = r[1] * cell + ty * tile;
+                    cv.drawRect(l, t, l + tile, t + tile, fillP);
+                }
+            }
+        }
+
+        private void drawGrid(Canvas cv, int[] r, int step) {
             float left = r[0] * cell;
             float top = r[1] * cell;
             float right = (r[0] + r[2]) * cell;
             float bottom = (r[1] + r[3]) * cell;
-            for (int x = r[0]; x <= r[0] + r[2]; x++) cv.drawLine(x * cell, top, x * cell, bottom, lineP);
-            for (int y = r[1]; y <= r[1] + r[3]; y++) cv.drawLine(left, y * cell, right, y * cell, lineP);
+            for (int x = r[0]; x <= r[0] + r[2]; x += step) cv.drawLine(x * cell, top, x * cell, bottom, lineP);
+            for (int y = r[1]; y <= r[1] + r[3]; y += step) cv.drawLine(left, y * cell, right, y * cell, lineP);
         }
 
         private void drawBox(Canvas cv, int[] r) {
@@ -542,13 +558,13 @@ public final class CapePauseOverlay {
         }
 
         @Override public boolean onTouchEvent(MotionEvent e) {
-            int x = cellAt(e.getX(), CapeEditorModel.W);
-            int y = cellAt(e.getY(), CapeEditorModel.H);
+            int x = cellAt(e.getX(), model.w);
+            int y = cellAt(e.getY(), model.h);
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     // drawing must never be mistaken for a scroll of the card
                     if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
-                    strokeFace = CapeEditorModel.faceAt(x, y);
+                    strokeFace = model.faceAt(x, y);
                     strokeSnapshot = false;
                     lastX = -1;
                     lastY = -1;
@@ -583,7 +599,7 @@ public final class CapePauseOverlay {
          */
         private void stroke(int x, int y) {
             if (strokeFace == null) {
-                strokeFace = CapeEditorModel.faceAt(x, y);
+                strokeFace = model.faceAt(x, y);
                 if (strokeFace == null) return;
                 lastX = -1;
                 lastY = -1;
@@ -591,7 +607,7 @@ public final class CapePauseOverlay {
             snapshotOnce();
             int fromX = lastX < 0 ? x : lastX;
             int fromY = lastY < 0 ? y : lastY;
-            model.line(fromX, fromY, x, y, tool == TOOL_ERASER ? 0 : color, strokeFace);
+            model.line(fromX, fromY, x, y, tool == TOOL_ERASER ? 0 : color, strokeFace, brush);
             lastX = x;
             lastY = y;
             invalidate();
@@ -677,6 +693,8 @@ public final class CapePauseOverlay {
         private final TextView[] toolButtons = new TextView[3];
         private int curColor = 0xFFFFFFFF;
         private int curTool = PixelView.TOOL_PEN;
+        private int curBrush = 1;          // pen size in cells
+        private TextView brushButton;
         private int builtW;
         private int builtH;
         private int lastMaxHeight = -1;
@@ -690,7 +708,6 @@ public final class CapePauseOverlay {
         private int posX;
         private int posY;
         private String activeName = "";
-        private Dialog dialog;
         private long nextAttachTry;
         private int attachFailLogs;
         private boolean attachLogged;
@@ -705,6 +722,10 @@ public final class CapePauseOverlay {
             posX = prefs.getInt("x", defX);
             posY = prefs.getInt("y", dp(12));
             collapsed = prefs.getBoolean("collapsed", false);
+            // the resolution chosen last time (the drawing itself only lives as long as the game does)
+            int savedRes = CapeEditorModel.normalizeScale(prefs.getInt("res", 1));
+            if (savedRes != sModel.scale) sModel = sModel.resampled(savedRes);
+            curBrush = CapeEditorModel.defaultBrush(sModel.scale);
             build();
             // not attached yet: setShown(true) does that, and only while the pause menu is open
         }
@@ -888,11 +909,6 @@ public final class CapePauseOverlay {
             menuBox.addView(r1);
 
             LinearLayout r2 = row();
-            r2.addView(button("Paste Link", 0, new Runnable() {
-                @Override public void run() {
-                    showLinkDialog();
-                }
-            }), weighted(3));
             r2.addView(button("Canvas", 0, new Runnable() {
                 @Override public void run() {
                     showCanvas();
@@ -908,24 +924,35 @@ public final class CapePauseOverlay {
             listBox.setPadding(0, dp(6), 0, 0);
         }
 
-        /** Builds the canvas screen for the current display size (also used to rebuild it if the size changes). */
+        /**
+         * Builds the canvas screen for the current display size and resolution (also
+         * used to rebuild it when either changes). The canvas keeps about the same
+         * size on screen at every resolution: more cells, smaller cells.
+         */
         private void buildCanvas() {
             DisplayMetrics dm = activity.getResources().getDisplayMetrics();
             builtW = dm.widthPixels;
             builtH = dm.heightPixels;
-            CapeEditorModel.CanvasPlan plan = CapeEditorModel.planCanvas(builtW, builtH, density);
-            logFile("canvas layout: cell=" + plan.cellPx + "px sideBySide=" + plan.sideBySide
-                    + " screen=" + builtW + "x" + builtH + " density=" + density);
+            CapeEditorModel.CanvasPlan plan = CapeEditorModel.planCanvas(builtW, builtH, density, sModel.scale);
+            if (!plan.fits) { // a very small / low-density display: this resolution would be wider than the screen
+                logFile("resolution " + CapeEditorModel.label(sModel.scale) + " does not fit this screen, using 64x32");
+                sModel = sModel.resampled(1);
+                plan = CapeEditorModel.planCanvas(builtW, builtH, density, 1);
+            }
+            final CapeEditorModel model = sModel;
+            curBrush = CapeEditorModel.clampBrush(model.scale, curBrush);
+            logFile("canvas layout: " + CapeEditorModel.label(model.scale) + " cell=" + plan.cellPx
+                    + "px sideBySide=" + plan.sideBySide + " screen=" + builtW + "x" + builtH + " density=" + density);
             final int cell = plan.cellPx;
-            final int canvasW = cell * CapeEditorModel.W;
-            final int canvasH = cell * CapeEditorModel.H;
+            final int canvasW = cell * model.w;
+            final int canvasH = cell * model.h;
 
             canvasBox = new LinearLayout(activity);
             canvasBox.setOrientation(LinearLayout.VERTICAL);
             canvasBox.setPadding(0, dp(4), 0, 0);
 
             TextView hint = label("Green = outside, White = inside (auto-copied if empty)", 11f, C_MUTED, false);
-            hint.setMaxWidth(plan.sideBySide ? canvasW + dp(10 + 156) : canvasW);
+            hint.setMaxWidth(plan.sideBySide ? canvasW + dp(10 + 208) : Math.max(canvasW, dp(208)));
             canvasBox.addView(hint);
 
             LinearLayout body = new LinearLayout(activity);
@@ -935,9 +962,10 @@ public final class CapePauseOverlay {
             bp.topMargin = dp(6);
             canvasBox.addView(body, bp);
 
-            pixelView = new PixelView(activity, sModel, cell);
+            pixelView = new PixelView(activity, model, cell);
             pixelView.color = curColor;
             pixelView.tool = curTool;
+            pixelView.brush = curBrush;
             body.addView(pixelView, new LinearLayout.LayoutParams(canvasW, canvasH));
 
             LinearLayout side = new LinearLayout(activity);
@@ -948,8 +976,25 @@ public final class CapePauseOverlay {
             else sideLp.topMargin = dp(8);
             body.addView(side, sideLp);
 
-            // palette: 6 columns beside the canvas, 8 columns below it
-            final int cols = plan.sideBySide ? 6 : 8;
+            // resolution: one button per size that fits this screen, the current one highlighted
+            LinearLayout resRow = row();
+            for (int i = 0; i < CapeEditorModel.SCALES.length; i++) {
+                final int s = CapeEditorModel.SCALES[i];
+                if (!CapeEditorModel.planCanvas(builtW, builtH, density, s).fits) continue;
+                TextView rb = compactButton(CapeEditorModel.label(s), s == model.scale ? 1 : 0, new Runnable() {
+                    @Override public void run() {
+                        setResolution(s);
+                    }
+                });
+                rb.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 10f); // dp, not sp: the label must fit its slot at any font scale
+                rb.setPadding(dp(2), dp(4), dp(2), dp(4));
+                rb.setMinHeight(dp(26));
+                resRow.addView(rb, weighted(1));
+            }
+            side.addView(resRow);
+
+            // palette: 8 colours per row
+            final int cols = 8;
             final int sw = dp(22);
             for (int r = 0; r * cols < PALETTE.length; r++) {
                 LinearLayout pr = row();
@@ -1003,8 +1048,7 @@ public final class CapePauseOverlay {
             LinearLayout t2 = row();
             t2.addView(compactButton("Undo", 0, new Runnable() {
                 @Override public void run() {
-                    sModel.undo();
-                    pixelView.invalidate();
+                    undoStep();
                 }
             }), weighted(2));
             t2.addView(compactButton("Clear", 0, new Runnable() {
@@ -1013,7 +1057,71 @@ public final class CapePauseOverlay {
                     pixelView.invalidate();
                 }
             }), weighted(2));
+            // pen size: only useful when there are more cells than pixels in a 64x32 cape
+            brushButton = compactButton("", 0, new Runnable() {
+                @Override public void run() {
+                    cycleBrush();
+                }
+            });
+            brushButton.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 12f); // dp: "Size 10" must fit its slot at any font scale
+            brushButton.setVisibility(model.scale > 1 ? View.VISIBLE : View.GONE);
+            updateBrushButton();
+            t2.addView(brushButton, weighted(2));
             side.addView(t2);
+        }
+
+        /** Converts the drawing to another resolution and rebuilds the canvas screen. */
+        private void setResolution(int s) {
+            if (s == sModel.scale) return;
+            boolean smaller = s < sModel.scale;
+            sModel = sModel.resampled(s);
+            afterResolutionChange();
+            setStatus("Now " + CapeEditorModel.label(s) + (smaller ? ": fine detail was merged. " : ". ")
+                    + "Undo goes back.");
+        }
+
+        /** Undo; once nothing is left to undo, step back across the last resolution change. */
+        private void undoStep() {
+            if (sModel.undo()) {
+                pixelView.invalidate();
+                return;
+            }
+            CapeEditorModel before = sModel.previous();
+            if (before != null) {
+                sModel = before;
+                afterResolutionChange();
+                setStatus("Back to " + CapeEditorModel.label(sModel.scale) + ".");
+            }
+        }
+
+        private void afterResolutionChange() {
+            curBrush = CapeEditorModel.defaultBrush(sModel.scale);
+            prefs.edit().putInt("res", sModel.scale).apply();
+            logFile("resolution: " + CapeEditorModel.label(sModel.scale));
+            rebuildCanvas();
+        }
+
+        private void cycleBrush() {
+            curBrush = CapeEditorModel.nextBrush(sModel.scale, curBrush);
+            if (pixelView != null) pixelView.brush = curBrush;
+            updateBrushButton();
+        }
+
+        private void updateBrushButton() {
+            if (brushButton != null) brushButton.setText("Size " + curBrush);
+        }
+
+        /** Replaces the canvas screen with a freshly built one. */
+        private void rebuildCanvas() {
+            int idx = content.indexOfChild(canvasBox);
+            content.removeView(canvasBox);
+            try {
+                buildCanvas(); // also records the screen size, so a failure is not retried on every tick
+            } finally {
+                content.addView(canvasBox, Math.max(0, idx));
+            }
+            applyMode();
+            clampAfterLayout();
         }
 
         /** Called whenever the card is about to be shown: rebuilds the canvas if the screen size changed. */
@@ -1021,11 +1129,7 @@ public final class CapePauseOverlay {
             DisplayMetrics dm = activity.getResources().getDisplayMetrics();
             if (dm.widthPixels == builtW && dm.heightPixels == builtH) return;
             try {
-                int idx = content.indexOfChild(canvasBox);
-                content.removeView(canvasBox);
-                buildCanvas(); // also records the new size, so a failure is not retried on every tick
-                content.addView(canvasBox, Math.max(0, idx));
-                applyMode();
+                rebuildCanvas();
             } catch (Throwable t) {
                 builtW = dm.widthPixels;
                 builtH = dm.heightPixels;
@@ -1112,7 +1216,6 @@ public final class CapePauseOverlay {
         }
 
         void detach() {
-            dismissDialog();
             shown = false;
             if (!attached) return;
             attached = false;
@@ -1358,7 +1461,8 @@ public final class CapePauseOverlay {
             listBox.removeAllViews();
             String[] parts = (names == null || names.length() == 0) ? new String[0] : names.split("\n");
             if (parts.length == 0) {
-                TextView empty = label("No capes yet. Use Paste Link or Canvas.", 12f, C_MUTED, false);
+                TextView empty = label("No capes yet. Use Canvas, or add a .png to the customcape folder.", 12f, C_MUTED, false);
+                empty.setMaxWidth(dp(260));
                 empty.setPadding(dp(4), dp(8), dp(4), dp(8));
                 listBox.addView(empty);
                 return;
@@ -1421,11 +1525,13 @@ public final class CapePauseOverlay {
                 return;
             }
             final byte[] rgba = sModel.toRgba();
+            final int texW = sModel.texW;
+            final int texH = sModel.texH;
             final String name = "Drawing" + new SimpleDateFormat("MMddHHmmss", Locale.US).format(new Date());
             setStatus("Saving...");
             run(new Job() {
                 @Override String work() {
-                    return nativeSaveDrawn(rgba, CapeEditorModel.TEX_W, CapeEditorModel.TEX_H, name);
+                    return nativeSaveDrawn(rgba, texW, texH, name);
                 }
 
                 @Override void finish(Ui ui, String result) {
@@ -1434,163 +1540,6 @@ public final class CapePauseOverlay {
                     if (result != null && result.startsWith("OK:")) ui.setMode(MODE_MENU);
                 }
             });
-        }
-
-        /** Link (Bedrock Cosmos zip/png) or a local file path. */
-        private void importFromText(String raw) {
-            final String src = raw == null ? "" : raw.trim();
-            if (src.length() == 0) {
-                setStatus("ERR: Link is empty.");
-                return;
-            }
-            setStatus("Downloading cape...");
-            final File cache = new File(activity.getApplicationContext().getCacheDir(), "customcape_dl");
-            run(new Job() {
-                @Override String work() {
-                    if (CapeEditorModel.looksLikeHttp(src)) {
-                        String png = CapeDownloadHelper.downloadAndExtractCape(src, cache.getAbsolutePath());
-                        if (png == null) {
-                            String why = CapeDownloadHelper.lastError;
-                            return "ERR: " + (why == null || why.length() == 0
-                                    ? "Download failed. Check the link and your internet." : why);
-                        }
-                        return nativeImportPng(png, CapeEditorModel.nameFromUrl(src));
-                    }
-                    File f = new File(src);
-                    if (!f.isFile()) return "ERR: File not found.";
-                    return nativeImportPng(f.getAbsolutePath(), CapeEditorModel.nameFromPath(src));
-                }
-
-                @Override void finish(Ui ui, String result) {
-                    ui.setStatus(result);
-                    ui.refreshActive();
-                }
-            });
-        }
-
-        // ---- link dialog ---------------------------------------------------------------------
-        private void dismissDialog() {
-            if (dialog != null) {
-                try {
-                    dialog.dismiss();
-                } catch (Throwable ignored) {
-                }
-                dialog = null;
-            }
-        }
-
-        private String clipboardText() {
-            try {
-                ClipboardManager cm = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
-                if (cm == null || !cm.hasPrimaryClip()) return "";
-                ClipData cd = cm.getPrimaryClip();
-                if (cd == null || cd.getItemCount() == 0) return "";
-                CharSequence t = cd.getItemAt(0).coerceToText(activity);
-                return t == null ? "" : t.toString().trim();
-            } catch (Throwable t) {
-                return "";
-            }
-        }
-
-        private void showLinkDialog() {
-            dismissDialog();
-            final Dialog d = new Dialog(activity);
-            d.requestWindowFeature(Window.FEATURE_NO_TITLE);
-
-            LinearLayout box = new LinearLayout(activity);
-            box.setOrientation(LinearLayout.VERTICAL);
-            box.setPadding(dp(18), dp(16), dp(18), dp(14));
-            box.setBackground(round(0xFF161A1F, dp(18), C_CARD_EDGE, Math.max(1, dp(1))));
-
-            box.addView(label("Paste cape link", 16f, C_TEXT, true));
-            TextView hint = label("Bedrock Cosmos link (.zip or .png), or a file path on this device.", 12f, C_MUTED, false);
-            LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            hp.topMargin = dp(4);
-            hp.bottomMargin = dp(10);
-            box.addView(hint, hp);
-
-            final EditText input = new EditText(activity);
-            input.setSingleLine(true);
-            input.setTextColor(C_TEXT);
-            input.setHintTextColor(C_MUTED);
-            input.setHint("https://capes.bedrock-cosmos.app/zips/name.zip");
-            input.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13f));
-            input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-            input.setImeOptions(EditorInfo.IME_ACTION_DONE);
-            input.setBackground(round(C_FIELD, dp(10), 0x33FFFFFF, Math.max(1, dp(1))));
-            input.setPadding(dp(12), dp(10), dp(12), dp(10));
-            String clip = clipboardText();
-            if (CapeEditorModel.looksLikeHttp(clip)) {
-                input.setText(clip);
-                input.setSelection(clip.length());
-            }
-            box.addView(input, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-            LinearLayout buttons = row();
-            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            bp.topMargin = dp(12);
-            buttons.addView(button("Paste", 0, new Runnable() {
-                @Override public void run() {
-                    String c = clipboardText();
-                    if (c.length() > 0) {
-                        input.setText(c);
-                        input.setSelection(c.length());
-                    }
-                }
-            }), weighted(3));
-            buttons.addView(button("Cancel", 0, new Runnable() {
-                @Override public void run() {
-                    dismissDialog();
-                }
-            }), weighted(3));
-            buttons.addView(button("Import", 1, new Runnable() {
-                @Override public void run() {
-                    String text = input.getText().toString();
-                    dismissDialog();
-                    importFromText(text);
-                }
-            }), weighted(3));
-            box.addView(buttons, bp);
-
-            d.setContentView(box);
-            Window w = d.getWindow();
-            if (w != null) {
-                DisplayMetrics dm = activity.getResources().getDisplayMetrics();
-                int width = Math.min(dp(440), (int) (dm.widthPixels * 0.9f));
-                w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-                w.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
-                w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-                        | WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
-                // Show without focus first so the game's immersive mode is not
-                // interrupted, then copy its system-UI flags and take focus.
-                w.setFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
-            }
-            input.setOnEditorActionListener(new TextView.OnEditorActionListener() {
-                @Override public boolean onEditorAction(TextView v, int actionId, android.view.KeyEvent ev) {
-                    if (actionId == EditorInfo.IME_ACTION_DONE) {
-                        String text = input.getText().toString();
-                        dismissDialog();
-                        importFromText(text);
-                        return true;
-                    }
-                    return false;
-                }
-            });
-            dialog = d;
-            d.show();
-            if (w != null) {
-                try {
-                    w.getDecorView().setSystemUiVisibility(
-                            activity.getWindow().getDecorView().getSystemUiVisibility());
-                } catch (Throwable ignored) {
-                }
-                w.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
-            }
-            input.requestFocus();
         }
     }
 }
