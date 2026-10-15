@@ -1,6 +1,12 @@
 package org.levimc.launcher.customcape;
 
+import java.io.File;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
 
 /**
  * Pixel model behind the in-game cape editor (see CapePauseOverlay).
@@ -497,5 +503,152 @@ final class CapeEditorModel {
     /** Whole dp, rounded DOWN to whole px, so the canvas never ends up taller than planned. */
     private static int cellToPx(float dp, float density) {
         return Math.max(1, (int) Math.floor((double) ((float) Math.floor(dp) * density)));
+    }
+}
+
+/**
+ * Cape names and cape files, as pure Java (no android.*), so it is unit-tested on a PC.
+ * It sits in this file on purpose: the CI compile list only names the files, so a second
+ * top-level class here needs no change to build.yml.
+ *
+ * The panel has its own on-screen keyboard (a game window that grabs the system keyboard
+ * could take the focus away from Minecraft), so a name can only contain what that
+ * keyboard can type: letters, digits, space, '-' and '_'. Those are all kept as they are
+ * by the native file-name clean-up, so the name shown in the list is the file name.
+ */
+final class CapeNames {
+
+    private CapeNames() {}
+
+    /** Longest name the panel accepts (the native side cuts at 48 bytes). */
+    static final int MAX_LEN = 28;
+
+    /** Keyboard rows, top to bottom. Space has its own key; Shift makes the letters capitals. */
+    static final String ROW_DIGITS = "1234567890";
+    static final String ROW_TOP = "qwertyuiop";
+    static final String ROW_MID = "asdfghjkl";
+    static final String ROW_LOW = "zxcvbnm";
+    static final String ROW_EXTRA = "-_";
+
+    /** The name used when the player does not type one: "Drawing" + month day hour minute second. */
+    static String autoName(Date when) {
+        return "Drawing" + new SimpleDateFormat("MMddHHmmss", Locale.US).format(when);
+    }
+
+    /** True for every character the name keyboard can type. */
+    static boolean isKeyChar(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                || c == ' ' || c == '-' || c == '_';
+    }
+
+    /**
+     * What the player typed -> a clean name. "" means "no name given": the caller then uses
+     * autoName(). Anything the keyboard cannot type is dropped, runs of spaces become one,
+     * the ends are trimmed and the result is cut to MAX_LEN.
+     */
+    static String clean(String raw) {
+        if (raw == null) return "";
+        StringBuilder sb = new StringBuilder(raw.length());
+        boolean lastSpace = true; // also drops leading spaces
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (!isKeyChar(c)) continue;
+            if (c == ' ') {
+                if (lastSpace) continue;
+                lastSpace = true;
+            } else {
+                lastSpace = false;
+            }
+            sb.append(c);
+        }
+        if (sb.length() > MAX_LEN) sb.setLength(MAX_LEN);
+        while (sb.length() > 0 && sb.charAt(sb.length() - 1) == ' ') sb.setLength(sb.length() - 1);
+        return sb.toString();
+    }
+
+    private static boolean containsIgnoreCase(Collection<String> names, String name) {
+        if (names == null) return false;
+        for (String n : names) {
+            if (n != null && n.equalsIgnoreCase(name)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * `base` if no cape has that name yet, else "base (2)", "base (3)", ... A save never
+     * silently replaces another cape. Compared without regard to case, because the shared
+     * storage the capes live in ignores case.
+     */
+    static String unique(String base, Collection<String> existing) {
+        if (!containsIgnoreCase(existing, base)) return base;
+        for (int n = 2; n < 1000; n++) {
+            String candidate = base + " (" + n + ")";
+            if (!containsIgnoreCase(existing, candidate)) return candidate;
+        }
+        return base + " (" + (System.currentTimeMillis() % 100000L) + ")";
+    }
+
+    /** The native list ("name\nname\n...") as a list. */
+    static List<String> split(String names) {
+        List<String> out = new ArrayList<String>();
+        if (names == null || names.length() == 0) return out;
+        String[] parts = names.split("\n");
+        for (int i = 0; i < parts.length; i++) {
+            if (parts[i].trim().length() > 0) out.add(parts[i]);
+        }
+        return out;
+    }
+
+    // ---- the name being typed ------------------------------------------------
+
+    /** `cur` plus one typed character (capital letters when shift is on); ignored when full or not typeable. */
+    static String type(String cur, char c, boolean shift) {
+        String s = cur == null ? "" : cur;
+        if (s.length() >= MAX_LEN || !isKeyChar(c)) return s;
+        if (c == ' ' && (s.length() == 0 || s.charAt(s.length() - 1) == ' ')) return s; // no leading / double spaces
+        if (shift && c >= 'a' && c <= 'z') c = (char) (c - 'a' + 'A');
+        return s + c;
+    }
+
+    static String backspace(String cur) {
+        if (cur == null || cur.length() == 0) return "";
+        return cur.substring(0, cur.length() - 1);
+    }
+
+    /** Shift switches on by itself at the start of the name and after a space, '-' or '_'. */
+    static boolean wantsShift(String cur) {
+        if (cur == null || cur.length() == 0) return true;
+        char last = cur.charAt(cur.length() - 1);
+        return last == ' ' || last == '-' || last == '_';
+    }
+
+    // ---- files ------------------------------------------------------------------
+
+    /**
+     * Deletes the cape called `name`: <dir>/<name>.json and <dir>/<name>.png (the list shows
+     * one entry per name, so both go). Touches nothing else. Returns how many files were
+     * deleted; 0 for an unknown or unusable name.
+     */
+    static int deleteCapeFiles(File dir, String name) {
+        if (dir == null || name == null || name.length() == 0) return 0;
+        if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('\n') >= 0
+                || name.indexOf('\r') >= 0 || name.equals(".") || name.equals("..")) {
+            return 0;
+        }
+        File[] files = dir.listFiles();
+        if (files == null) return 0;
+        int deleted = 0;
+        for (int i = 0; i < files.length; i++) {
+            File f = files[i];
+            if (!f.isFile()) continue;
+            String fn = f.getName();
+            int dot = fn.lastIndexOf('.');
+            if (dot <= 0) continue;
+            String ext = fn.substring(dot).toLowerCase(Locale.ROOT);
+            if (!ext.equals(".json") && !ext.equals(".png")) continue;
+            if (!fn.substring(0, dot).equals(name)) continue;
+            if (f.delete()) deleted++;
+        }
+        return deleted;
     }
 }

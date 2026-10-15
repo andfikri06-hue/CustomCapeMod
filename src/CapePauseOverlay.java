@@ -33,7 +33,9 @@ import java.io.FileWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -41,7 +43,7 @@ import java.util.concurrent.Executors;
 
 /**
  * Custom Cape UI that only exists while Minecraft's vanilla PAUSE MENU is open.
- * Select / remove a cape, or draw one on a canvas (64x32 up to 640x320).
+ * Select / remove / delete a cape, or draw one on a canvas (64x32 up to 640x320) and name it.
  *
  * Why this is Java instead of pl::modmenu buttons: LeviLaunchroid hides every
  * mod button / HUD draw command whenever the pause menu is open (it treats
@@ -106,19 +108,28 @@ public final class CapePauseOverlay {
     private static Method sActivityMethod;
     private static boolean sActivityLookupFailed;
 
-    // Colours (same mint accent as the launcher's own accent buttons).
-    static final int C_CARD = 0xF2151A20;
-    static final int C_CARD_EDGE = 0x554AE0A0;
-    static final int C_BTN = 0xFF242B33;
-    static final int C_BTN_DOWN = 0xFF34404B;
-    static final int C_ACCENT = 0xFF4AE0A0;
-    static final int C_ACCENT_DOWN = 0xFF39C58C;
-    static final int C_ON_ACCENT = 0xFF08130E;
-    static final int C_TEXT = 0xFFE9EEF2;
-    static final int C_MUTED = 0xFF8E9BA6;
-    static final int C_DANGER = 0xFFFF7A7A;
-    static final int C_FIELD = 0xFF0F1318;
-    static final int C_LOCKED = 0xFF0C1014; // canvas cells that can not be painted (outside the two faces)
+    // Colours: black and blue. Red is only used for things that remove something.
+    static final String VERSION_LABEL = "v1.4";
+    static final int C_CARD = 0xF206080D;          // near black, a little see-through
+    static final int C_CARD_EDGE = 0xFF1B2B52;     // thin blue edge
+    static final int C_BTN = 0xFF10182A;           // buttons, chips, fields
+    static final int C_BTN_DOWN = 0xFF1A2641;
+    static final int C_BTN_EDGE = 0xFF1E2C4A;
+    static final int C_ACCENT = 0xFF2A66F5;        // blue (fills; white text on it passes 4.5:1)
+    static final int C_ACCENT_DOWN = 0xFF2458D8;
+    static final int C_ACCENT_SOFT = 0xFF11204A;   // blue tint behind the selected row
+    static final int C_ACCENT_LIGHT = 0xFF74A3FF;  // blue for text / outlines on black
+    static final int C_ON_ACCENT = 0xFFFFFFFF;
+    static final int C_TEXT = 0xFFEAF0FF;
+    static final int C_MUTED = 0xFF8A97B4;
+    static final int C_DANGER = 0xFFFF5A6E;        // red text / icons on black
+    static final int C_DANGER_BG = 0xFF2A1019;
+    static final int C_DANGER_BG_DOWN = 0xFF3C1722;
+    static final int C_DANGER_EDGE = 0xFF5A1F2E;
+    static final int C_DANGER_SOLID = 0xFFE11D48;  // filled red: the final "Delete"
+    static final int C_DANGER_SOLID_DOWN = 0xFFBE123C;
+    static final int C_FIELD = 0xFF0A1020;
+    static final int C_LOCKED = 0xFF04060A;        // canvas cells that can not be painted (outside the two faces)
 
     // ------------------------------------------------------------------
     // Public API - called from C++ through JNI
@@ -394,9 +405,13 @@ public final class CapePauseOverlay {
     }
 
     static StateListDrawable pressable(int normal, int pressed, float radiusPx) {
+        return pressable(normal, pressed, radiusPx, 0, 0);
+    }
+
+    static StateListDrawable pressable(int normal, int pressed, float radiusPx, int stroke, int strokePx) {
         StateListDrawable s = new StateListDrawable();
-        s.addState(new int[]{android.R.attr.state_pressed}, round(pressed, radiusPx, 0, 0));
-        s.addState(new int[]{}, round(normal, radiusPx, 0, 0));
+        s.addState(new int[]{android.R.attr.state_pressed}, round(pressed, radiusPx, stroke, strokePx));
+        s.addState(new int[]{}, round(normal, radiusPx, stroke, strokePx));
         return s;
     }
 
@@ -404,11 +419,17 @@ public final class CapePauseOverlay {
     // Tiny custom views
     // ------------------------------------------------------------------
 
-    /** Drag grip (dots) / chevrons, drawn so we do not depend on font glyphs. */
+    /** Small icons drawn with lines and circles, so nothing depends on font glyphs. */
     static final class Glyph extends View {
         static final int GRIP = 0;
         static final int CHEV_DOWN = 1;
         static final int CHEV_RIGHT = 2;
+        static final int CHEV_LEFT = 3;
+        static final int TRASH = 4;
+        static final int CHECK = 5;
+        static final int DOT = 6;      // filled circle
+        static final int RING = 7;     // circle outline
+        static final int CURSOR = 8;   // thin rounded bar (the text cursor)
 
         private final int kind;
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -418,6 +439,11 @@ public final class CapePauseOverlay {
             this.kind = kind;
             p.setColor(color);
             p.setStrokeCap(Paint.Cap.ROUND);
+        }
+
+        void setGlyphColor(int color) {
+            p.setColor(color);
+            invalidate();
         }
 
         @Override protected void onDraw(Canvas cv) {
@@ -433,6 +459,38 @@ public final class CapePauseOverlay {
                     cv.drawCircle(cx - s * 0.16f, cy + i * s * 0.24f, r, p);
                     cv.drawCircle(cx + s * 0.16f, cy + i * s * 0.24f, r, p);
                 }
+            } else if (kind == DOT) {
+                p.setStyle(Paint.Style.FILL);
+                cv.drawCircle(cx, cy, s / 2f, p);
+            } else if (kind == RING) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(s * 0.14f);
+                cv.drawCircle(cx, cy, s / 2f - s * 0.07f, p);
+            } else if (kind == CURSOR) {
+                p.setStyle(Paint.Style.FILL);
+                cv.drawRoundRect(0f, 0f, w, h, w / 2f, w / 2f, p);
+            } else if (kind == TRASH) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(Math.max(1.5f, s * 0.08f));
+                float u = s * 0.34f;
+                // lid and handle
+                cv.drawLine(cx - u, cy - 0.62f * u, cx + u, cy - 0.62f * u, p);
+                cv.drawLine(cx - 0.38f * u, cy - 0.62f * u, cx - 0.38f * u, cy - 0.98f * u, p);
+                cv.drawLine(cx - 0.38f * u, cy - 0.98f * u, cx + 0.38f * u, cy - 0.98f * u, p);
+                cv.drawLine(cx + 0.38f * u, cy - 0.98f * u, cx + 0.38f * u, cy - 0.62f * u, p);
+                // body
+                cv.drawLine(cx - 0.72f * u, cy - 0.38f * u, cx - 0.62f * u, cy + 0.96f * u, p);
+                cv.drawLine(cx - 0.62f * u, cy + 0.96f * u, cx + 0.62f * u, cy + 0.96f * u, p);
+                cv.drawLine(cx + 0.62f * u, cy + 0.96f * u, cx + 0.72f * u, cy - 0.38f * u, p);
+                // ribs
+                cv.drawLine(cx - 0.25f * u, cy - 0.08f * u, cx - 0.25f * u, cy + 0.66f * u, p);
+                cv.drawLine(cx + 0.25f * u, cy - 0.08f * u, cx + 0.25f * u, cy + 0.66f * u, p);
+            } else if (kind == CHECK) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(Math.max(1.5f, s * 0.12f));
+                float u = s * 0.34f;
+                cv.drawLine(cx - 0.9f * u, cy + 0.05f * u, cx - 0.3f * u, cy + 0.65f * u, p);
+                cv.drawLine(cx - 0.3f * u, cy + 0.65f * u, cx + 0.95f * u, cy - 0.7f * u, p);
             } else {
                 p.setStyle(Paint.Style.STROKE);
                 p.setStrokeWidth(s * 0.1f);
@@ -440,6 +498,9 @@ public final class CapePauseOverlay {
                 if (kind == CHEV_DOWN) {
                     cv.drawLine(cx - a, cy - a / 2f, cx, cy + a / 2f, p);
                     cv.drawLine(cx, cy + a / 2f, cx + a, cy - a / 2f, p);
+                } else if (kind == CHEV_LEFT) {
+                    cv.drawLine(cx + a / 2f, cy - a, cx - a / 2f, cy, p);
+                    cv.drawLine(cx - a / 2f, cy, cx + a / 2f, cy + a, p);
                 } else {
                     cv.drawLine(cx - a / 2f, cy - a, cx + a / 2f, cy, p);
                     cv.drawLine(cx + a / 2f, cy, cx - a / 2f, cy + a, p);
@@ -470,6 +531,7 @@ public final class CapePauseOverlay {
 
         private int lastX = -1;
         private int lastY = -1;
+        Runnable onStrokeStart;          // called when a finger goes down on the canvas
         private int[] strokeFace;        // face the current stroke began in (null = not on a face yet)
         private boolean strokeSnapshot;  // undo snapshot already taken for this stroke
         private final Paint fillP = new Paint();
@@ -512,13 +574,13 @@ public final class CapePauseOverlay {
             // faint grid, inside the faces only: every cell, or every standard pixel when cells are tiny
             int step = cell >= 8 ? 1 : model.scale;
             lineP.setStrokeWidth(1f);
-            lineP.setColor(0x22FFFFFF);
+            lineP.setColor(0x1FFFFFFF);
             drawGrid(cv, model.outer, step);
             drawGrid(cv, model.inner, step);
 
-            // borders: outer face (green) and inner face (white)
+            // borders: outer face (blue) and inner face (white)
             lineP.setStrokeWidth(Math.max(2f, cell / 6f));
-            lineP.setColor(0xCC4AE0A0);
+            lineP.setColor(0xCC74A3FF);
             drawBox(cv, model.outer);
             lineP.setColor(0x88FFFFFF);
             drawBox(cv, model.inner);
@@ -531,7 +593,7 @@ public final class CapePauseOverlay {
             final int baseY = r[1] / s;
             for (int ty = 0; ty < r[3] / s; ty++) {
                 for (int tx = 0; tx < r[2] / s; tx++) {
-                    fillP.setColor(((baseX + tx + baseY + ty) & 1) == 0 ? 0xFF2B333B : 0xFF222930);
+                    fillP.setColor(((baseX + tx + baseY + ty) & 1) == 0 ? 0xFF1A2231 : 0xFF141B27);
                     float l = r[0] * cell + tx * tile;
                     float t = r[1] * cell + ty * tile;
                     cv.drawRect(l, t, l + tile, t + tile, fillP);
@@ -564,6 +626,7 @@ public final class CapePauseOverlay {
                 case MotionEvent.ACTION_DOWN:
                     // drawing must never be mistaken for a scroll of the card
                     if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+                    if (onStrokeStart != null) onStrokeStart.run();
                     strokeFace = model.faceAt(x, y);
                     strokeSnapshot = false;
                     lastX = -1;
@@ -622,6 +685,20 @@ public final class CapePauseOverlay {
         }
     }
 
+    /**
+     * An empty gap. A plain View is greedy: offered "at most 300dp" it measures 300dp, which would make a
+     * whole keyboard row (and the card) as wide as the screen. This one only takes what it is told to.
+     */
+    static final class Spacer extends View {
+        Spacer(Context c) {
+            super(c);
+        }
+
+        @Override protected void onMeasure(int wSpec, int hSpec) {
+            setMeasuredDimension(resolveSize(0, wSpec), resolveSize(0, hSpec));
+        }
+    }
+
     /** ScrollView that never grows taller than maxHeightPx, so the card always fits on the screen. */
     static final class MaxHeightScroll extends ScrollView {
         private int maxHeightPx = Integer.MAX_VALUE;
@@ -664,6 +741,7 @@ public final class CapePauseOverlay {
     static final int MODE_MENU = 0;
     static final int MODE_LIST = 1;
     static final int MODE_CANVAS = 2;
+    static final int MODE_NAME = 3;
 
     private static final int[] PALETTE = {
             0xFF000000, 0xFF3B3B3B, 0xFF7F7F7F, 0xFFBFBFBF, 0xFFFFFFFF, 0xFF6B4423, 0xFFC8A165, 0xFFF1E3C3,
@@ -680,11 +758,15 @@ public final class CapePauseOverlay {
         private LinearLayout card;
         private MaxHeightScroll scroll;
         private LinearLayout content;
+        private LinearLayout chip;
+        private Glyph chipDot;
         private LinearLayout menuBox;
         private LinearLayout listBox;
         private LinearLayout canvasBox;
+        private LinearLayout nameBox;
         private LinearLayout footerList;
         private LinearLayout footerCanvas;
+        private LinearLayout footerName;
         private TextView activeText;
         private TextView msgText;
         private Glyph chevron;
@@ -698,6 +780,20 @@ public final class CapePauseOverlay {
         private int builtW;
         private int builtH;
         private int lastMaxHeight = -1;
+        private boolean statusIsError;
+        private int refitCount;
+
+        // the Select Cape list
+        private List<String> capeNames = new ArrayList<String>();
+        private String pendingDelete = ""; // the cape whose "Delete?" question is open ("" = none)
+
+        // the Save screen (name + on-screen keyboard)
+        private String nameText = "";
+        private boolean shiftOn = true;
+        private TextView nameValue;
+        private TextView nameHint;
+        private TextView shiftKey;
+        private final List<TextView> letterKeys = new ArrayList<TextView>();
 
         private WindowManager.LayoutParams lp;
         private boolean attached;
@@ -718,7 +814,7 @@ public final class CapePauseOverlay {
             prefs = a.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
             density = a.getResources().getDisplayMetrics().density;
             // first start: top-right, so the vanilla buttons on the left stay uncovered
-            int defX = Math.max(dp(12), a.getResources().getDisplayMetrics().widthPixels - dp(290));
+            int defX = Math.max(dp(12), a.getResources().getDisplayMetrics().widthPixels - dp(300));
             posX = prefs.getInt("x", defX);
             posY = prefs.getInt("y", dp(12));
             collapsed = prefs.getBoolean("collapsed", false);
@@ -740,6 +836,10 @@ public final class CapePauseOverlay {
                     activity.getResources().getDisplayMetrics());
         }
 
+        private int hairline() {
+            return Math.max(1, dp(1));
+        }
+
         // ---- view factory -------------------------------------------------
         private TextView label(String text, float sizeSp, int color, boolean bold) {
             TextView t = new TextView(activity);
@@ -751,17 +851,9 @@ public final class CapePauseOverlay {
             return t;
         }
 
-        /** style: 0 normal, 1 accent, 2 danger */
-        private TextView button(String text, int style, final Runnable onClick) {
-            TextView b = label(text, 13f, style == 1 ? C_ON_ACCENT : style == 2 ? C_DANGER : C_TEXT, true);
-            b.setGravity(Gravity.CENTER);
-            b.setPadding(dp(12), dp(10), dp(12), dp(10));
-            b.setMinHeight(dp(40));
-            b.setClickable(true);
-            b.setBackground(style == 1
-                    ? pressable(C_ACCENT, C_ACCENT_DOWN, dp(10))
-                    : pressable(C_BTN, C_BTN_DOWN, dp(10)));
-            b.setOnClickListener(new View.OnClickListener() {
+        /** A click listener that can never throw into the game: a failure is logged and shown instead. */
+        private View.OnClickListener safe(final Runnable onClick) {
+            return new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     try {
                         onClick.run();
@@ -770,23 +862,93 @@ public final class CapePauseOverlay {
                         setStatus("ERR: " + t);
                     }
                 }
-            });
+            };
+        }
+
+        /**
+         * style: 0 normal, 1 primary (blue), 2 danger (red on dark red), 3 solid red.
+         * Red is only ever used for things that remove something.
+         */
+        private TextView button(String text, int style, Runnable onClick) {
+            int fg = C_TEXT;
+            int bg = C_BTN;
+            int down = C_BTN_DOWN;
+            int edge = C_BTN_EDGE;
+            if (style == 1) {
+                fg = C_ON_ACCENT;
+                bg = C_ACCENT;
+                down = C_ACCENT_DOWN;
+                edge = C_ACCENT;
+            } else if (style == 2) {
+                fg = C_DANGER;
+                bg = C_DANGER_BG;
+                down = C_DANGER_BG_DOWN;
+                edge = C_DANGER_EDGE;
+            } else if (style == 3) {
+                fg = C_ON_ACCENT;
+                bg = C_DANGER_SOLID;
+                down = C_DANGER_SOLID_DOWN;
+                edge = C_DANGER_SOLID;
+            }
+            TextView b = label(text, 13f, fg, true);
+            b.setGravity(Gravity.CENTER);
+            b.setPadding(dp(12), dp(10), dp(12), dp(10));
+            b.setMinHeight(dp(42));
+            b.setClickable(true);
+            b.setBackground(pressable(bg, down, dp(12), edge, hairline()));
+            b.setOnClickListener(safe(onClick));
             return b;
         }
 
-        /** Smaller button for the toolbar and the pinned footers. style: 0 normal, 1 accent, 2 danger */
+        /** Smaller button for the toolbar and the pinned footers. Same styles as button(). */
         private TextView compactButton(String text, int style, Runnable onClick) {
             TextView b = button(text, style, onClick);
             b.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12f));
-            b.setPadding(dp(6), dp(7), dp(6), dp(7));
+            b.setPadding(dp(8), dp(7), dp(8), dp(7));
             b.setMinHeight(dp(34));
             b.setSingleLine(true);
             return b;
         }
 
+        /** Rounded bar that holds a row of segments (resolution, tools). */
+        private LinearLayout segmentedBar() {
+            LinearLayout bar = row();
+            bar.setPadding(dp(2), dp(2), dp(2), dp(2));
+            bar.setBackground(round(C_BTN, dp(12), C_BTN_EDGE, hairline()));
+            return bar;
+        }
+
+        /** One choice inside a segmentedBar(); the selected one is a blue pill. Text size is in dp so it always fits. */
+        private TextView segment(String text, float textDp, boolean on, Runnable onClick) {
+            TextView t = label(text, 11f, C_TEXT, true);
+            t.setTextSize(TypedValue.COMPLEX_UNIT_DIP, textDp);
+            t.setGravity(Gravity.CENTER);
+            t.setSingleLine(true);
+            t.setPadding(dp(3), dp(6), dp(3), dp(6));
+            t.setMinHeight(dp(28));
+            t.setClickable(true);
+            styleSegment(t, on);
+            t.setOnClickListener(safe(onClick));
+            return t;
+        }
+
+        private void styleSegment(TextView t, boolean on) {
+            t.setBackground(on
+                    ? pressable(C_ACCENT, C_ACCENT_DOWN, dp(10))
+                    : pressable(0x00000000, C_BTN_DOWN, dp(10)));
+            t.setTextColor(on ? C_ON_ACCENT : C_MUTED);
+        }
+
         private LinearLayout row() {
             LinearLayout r = new LinearLayout(activity);
             r.setOrientation(LinearLayout.HORIZONTAL);
+            r.setBaselineAligned(false); // otherwise buttons with different font sizes get shifted against each other
+            return r;
+        }
+
+        private LinearLayout column() {
+            LinearLayout r = new LinearLayout(activity);
+            r.setOrientation(LinearLayout.VERTICAL);
             return r;
         }
 
@@ -796,13 +958,20 @@ public final class CapePauseOverlay {
             return p;
         }
 
+        private LinearLayout.LayoutParams fullWidth(int topDp) {
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            p.topMargin = dp(topDp);
+            return p;
+        }
+
         // ---- build ----------------------------------------------------------
         private void build() {
             card = new LinearLayout(activity);
             card.setOrientation(LinearLayout.VERTICAL);
-            card.setPadding(dp(10), dp(8), dp(10), dp(10));
-            card.setBackground(round(C_CARD, dp(16), C_CARD_EDGE, Math.max(1, dp(1))));
-            card.setMinimumWidth(dp(250));
+            card.setPadding(dp(12), dp(10), dp(12), dp(12));
+            card.setBackground(round(C_CARD, dp(20), C_CARD_EDGE, hairline()));
+            card.setMinimumWidth(dp(280));
 
             // header = drag handle (it never scrolls)
             LinearLayout header = row();
@@ -810,10 +979,15 @@ public final class CapePauseOverlay {
             header.setPadding(dp(2), dp(2), dp(2), dp(6));
             Glyph grip = new Glyph(activity, Glyph.GRIP, C_MUTED);
             header.addView(grip, new LinearLayout.LayoutParams(dp(22), dp(24)));
-            TextView title = label("Custom Cape", 15f, C_TEXT, true);
-            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            TextView title = label("Custom Cape", 16f, C_TEXT, true);
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             tlp.leftMargin = dp(6);
             header.addView(title, tlp);
+            TextView ver = label(VERSION_LABEL, 10f, C_ACCENT_LIGHT, true);
+            LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            vlp.leftMargin = dp(8);
+            header.addView(ver, vlp);
             chevron = new Glyph(activity, collapsed ? Glyph.CHEV_RIGHT : Glyph.CHEV_DOWN, C_MUTED);
             chevron.setClickable(true);
             chevron.setOnClickListener(new View.OnClickListener() {
@@ -838,38 +1012,49 @@ public final class CapePauseOverlay {
             card.addView(scroll, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            activeText = label("Loading...", 12f, C_MUTED, false);
-            content.addView(activeText);
+            // status chip: which cape is on
+            chip = row();
+            chip.setGravity(Gravity.CENTER_VERTICAL);
+            chip.setPadding(dp(10), dp(6), dp(12), dp(6));
+            chip.setBackground(round(C_BTN, dp(20), C_BTN_EDGE, hairline()));
+            chipDot = new Glyph(activity, Glyph.DOT, C_MUTED);
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(8), dp(8));
+            dlp.rightMargin = dp(8);
+            chip.addView(chipDot, dlp);
+            activeText = label("Loading...", 12f, C_TEXT, false);
+            activeText.setSingleLine(true);
+            activeText.setEllipsize(TextUtils.TruncateAt.END);
+            activeText.setMaxWidth(dp(230));
+            chip.addView(activeText);
+            content.addView(chip, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
             buildMenu();
             buildList();
             buildCanvas();
+            buildNameBox();
             content.addView(menuBox);
             content.addView(listBox);
             content.addView(canvasBox);
+            content.addView(nameBox);
 
             // Status line: pinned below the scrolling part so feedback is always visible.
             msgText = label("", 12f, C_MUTED, false);
             msgText.setMaxLines(3);
             msgText.setEllipsize(TextUtils.TruncateAt.END);
-            msgText.setMaxWidth(dp(330));
+            msgText.setMaxWidth(dp(256)); // wraps (up to 3 lines) instead of making the card wider
             msgText.setVisibility(View.GONE);
-            LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            mlp.topMargin = dp(6);
-            card.addView(msgText, mlp);
+            card.addView(msgText, fullWidth(8));
 
-            // Pinned buttons of the list / canvas screens (always reachable, never scrolled away).
+            // Pinned buttons of the list / canvas / save screens (always reachable, never scrolled away).
             footerList = row();
             footerList.addView(compactButton("Back", 0, new Runnable() {
                 @Override public void run() {
+                    pendingDelete = "";
                     setMode(MODE_MENU);
                 }
             }), weighted(2));
-            LinearLayout.LayoutParams f1 = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            f1.topMargin = dp(4);
-            card.addView(footerList, f1);
+            card.addView(footerList, fullWidth(6));
 
             footerCanvas = row();
             footerCanvas.addView(compactButton("Close", 0, new Runnable() {
@@ -879,21 +1064,30 @@ public final class CapePauseOverlay {
             }), weighted(2));
             footerCanvas.addView(compactButton("Save", 1, new Runnable() {
                 @Override public void run() {
-                    saveDrawing();
+                    openNameScreen();
                 }
             }), weighted(2));
-            LinearLayout.LayoutParams f2 = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            f2.topMargin = dp(4);
-            card.addView(footerCanvas, f2);
+            card.addView(footerCanvas, fullWidth(6));
+
+            footerName = row();
+            footerName.addView(compactButton("Back", 0, new Runnable() {
+                @Override public void run() {
+                    setMode(MODE_CANVAS);
+                }
+            }), weighted(2));
+            footerName.addView(compactButton("Save", 1, new Runnable() {
+                @Override public void run() {
+                    confirmSave();
+                }
+            }), weighted(2));
+            card.addView(footerName, fullWidth(6));
 
             applyMode();
         }
 
         private void buildMenu() {
-            menuBox = new LinearLayout(activity);
-            menuBox.setOrientation(LinearLayout.VERTICAL);
-            menuBox.setPadding(0, dp(6), 0, 0);
+            menuBox = column();
+            menuBox.setPadding(0, dp(8), 0, 0);
 
             LinearLayout r1 = row();
             r1.addView(button("Select Cape", 1, new Runnable() {
@@ -901,17 +1095,17 @@ public final class CapePauseOverlay {
                     showList();
                 }
             }), weighted(3));
-            r1.addView(button("Remove Cape", 2, new Runnable() {
+            r1.addView(button("Canvas", 0, new Runnable() {
                 @Override public void run() {
-                    removeCape();
+                    showCanvas();
                 }
             }), weighted(3));
             menuBox.addView(r1);
 
             LinearLayout r2 = row();
-            r2.addView(button("Canvas", 0, new Runnable() {
+            r2.addView(button("Remove Cape", 2, new Runnable() {
                 @Override public void run() {
-                    showCanvas();
+                    removeCape();
                 }
             }), weighted(3));
             menuBox.addView(r2);
@@ -919,9 +1113,8 @@ public final class CapePauseOverlay {
 
         private void buildList() {
             // The card's own scroll area scrolls this list; its Back button is pinned (footerList).
-            listBox = new LinearLayout(activity);
-            listBox.setOrientation(LinearLayout.VERTICAL);
-            listBox.setPadding(0, dp(6), 0, 0);
+            listBox = column();
+            listBox.setPadding(0, dp(8), 0, 0);
         }
 
         /**
@@ -947,11 +1140,10 @@ public final class CapePauseOverlay {
             final int canvasW = cell * model.w;
             final int canvasH = cell * model.h;
 
-            canvasBox = new LinearLayout(activity);
-            canvasBox.setOrientation(LinearLayout.VERTICAL);
-            canvasBox.setPadding(0, dp(4), 0, 0);
+            canvasBox = column();
+            canvasBox.setPadding(0, dp(6), 0, 0);
 
-            TextView hint = label("Green = outside, White = inside (auto-copied if empty)", 11f, C_MUTED, false);
+            TextView hint = label("Blue = outside, White = inside (auto-copied if empty)", 11f, C_MUTED, false);
             hint.setMaxWidth(plan.sideBySide ? canvasW + dp(10 + 208) : Math.max(canvasW, dp(208)));
             canvasBox.addView(hint);
 
@@ -966,38 +1158,41 @@ public final class CapePauseOverlay {
             pixelView.color = curColor;
             pixelView.tool = curTool;
             pixelView.brush = curBrush;
+            pixelView.onStrokeStart = new Runnable() {
+                @Override public void run() {
+                    if (statusIsError) setStatus(""); // drawing answers "Canvas is empty."
+                }
+            };
             body.addView(pixelView, new LinearLayout.LayoutParams(canvasW, canvasH));
 
-            LinearLayout side = new LinearLayout(activity);
-            side.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout side = column();
             LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             if (plan.sideBySide) sideLp.leftMargin = dp(10);
             else sideLp.topMargin = dp(8);
             body.addView(side, sideLp);
 
-            // resolution: one button per size that fits this screen, the current one highlighted
-            LinearLayout resRow = row();
+            // resolution: one segment per size that fits this screen, the current one is the blue pill
+            LinearLayout resBar = segmentedBar();
             for (int i = 0; i < CapeEditorModel.SCALES.length; i++) {
                 final int s = CapeEditorModel.SCALES[i];
                 if (!CapeEditorModel.planCanvas(builtW, builtH, density, s).fits) continue;
-                TextView rb = compactButton(CapeEditorModel.label(s), s == model.scale ? 1 : 0, new Runnable() {
+                resBar.addView(segment(CapeEditorModel.label(s), 10f, s == model.scale, new Runnable() {
                     @Override public void run() {
                         setResolution(s);
                     }
-                });
-                rb.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 10f); // dp, not sp: the label must fit its slot at any font scale
-                rb.setPadding(dp(2), dp(4), dp(2), dp(4));
-                rb.setMinHeight(dp(26));
-                resRow.addView(rb, weighted(1));
+                }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             }
-            side.addView(resRow);
+            side.addView(resBar);
 
             // palette: 8 colours per row
             final int cols = 8;
-            final int sw = dp(22);
+            final int sw = dp(20);
+            LinearLayout palette = column();
+            palette.setPadding(0, dp(6), 0, 0);
             for (int r = 0; r * cols < PALETTE.length; r++) {
                 LinearLayout pr = row();
+                pr.setGravity(Gravity.CENTER_HORIZONTAL);
                 for (int c = 0; c < cols && r * cols + c < PALETTE.length; c++) {
                     final int idx = r * cols + c;
                     View v = new View(activity);
@@ -1015,34 +1210,24 @@ public final class CapePauseOverlay {
                     lpS.setMargins(dp(2), dp(2), dp(2), dp(2));
                     pr.addView(v, lpS);
                 }
-                side.addView(pr);
+                palette.addView(pr);
             }
+            side.addView(palette);
             refreshSwatches();
 
-            // tools
-            LinearLayout t1 = row();
-            toolButtons[PixelView.TOOL_PEN] = compactButton("Pen", 0, new Runnable() {
-                @Override public void run() {
-                    selectTool(PixelView.TOOL_PEN);
-                }
-            });
-            toolButtons[PixelView.TOOL_ERASER] = compactButton("Erase", 0, new Runnable() {
-                @Override public void run() {
-                    selectTool(PixelView.TOOL_ERASER);
-                }
-            });
-            toolButtons[PixelView.TOOL_FILL] = compactButton("Fill", 0, new Runnable() {
-                @Override public void run() {
-                    selectTool(PixelView.TOOL_FILL);
-                }
-            });
-            t1.addView(toolButtons[0], weighted(2));
-            t1.addView(toolButtons[1], weighted(2));
-            t1.addView(toolButtons[2], weighted(2));
-            LinearLayout.LayoutParams t1p = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            t1p.topMargin = dp(4);
-            side.addView(t1, t1p);
+            // tools: one segmented control
+            LinearLayout toolBar = segmentedBar();
+            String[] toolNames = {"Pen", "Erase", "Fill"};
+            for (int i = 0; i < toolNames.length; i++) {
+                final int tool = i;
+                toolButtons[i] = segment(toolNames[i], 12f, false, new Runnable() {
+                    @Override public void run() {
+                        selectTool(tool);
+                    }
+                });
+                toolBar.addView(toolButtons[i], new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            }
+            side.addView(toolBar, fullWidth(6));
             selectTool(curTool);
 
             LinearLayout t2 = row();
@@ -1067,7 +1252,7 @@ public final class CapePauseOverlay {
             brushButton.setVisibility(model.scale > 1 ? View.VISIBLE : View.GONE);
             updateBrushButton();
             t2.addView(brushButton, weighted(2));
-            side.addView(t2);
+            side.addView(t2, fullWidth(4));
         }
 
         /** Converts the drawing to another resolution and rebuilds the canvas screen. */
@@ -1076,7 +1261,7 @@ public final class CapePauseOverlay {
             boolean smaller = s < sModel.scale;
             sModel = sModel.resampled(s);
             afterResolutionChange();
-            setStatus("Now " + CapeEditorModel.label(s) + (smaller ? ": fine detail was merged. " : ". ")
+            setStatus(CapeEditorModel.label(s) + (smaller ? ": fine detail merged. " : ". ")
                     + "Undo goes back.");
         }
 
@@ -1141,8 +1326,8 @@ public final class CapePauseOverlay {
             for (int i = 0; i < swatches.length; i++) {
                 if (swatches[i] == null) continue;
                 boolean sel = PALETTE[i] == curColor;
-                swatches[i].setBackground(round(PALETTE[i], dp(5), sel ? 0xFFFFFFFF : 0x44FFFFFF,
-                        sel ? Math.max(2, dp(2)) : Math.max(1, dp(1))));
+                swatches[i].setBackground(round(PALETTE[i], dp(6), sel ? 0xFFFFFFFF : 0x44FFFFFF,
+                        sel ? Math.max(2, dp(2)) : hairline()));
             }
         }
 
@@ -1150,12 +1335,143 @@ public final class CapePauseOverlay {
             curTool = tool;
             if (pixelView != null) pixelView.tool = tool;
             for (int i = 0; i < toolButtons.length; i++) {
-                if (toolButtons[i] == null) continue;
-                boolean on = i == tool;
-                toolButtons[i].setBackground(on
-                        ? pressable(C_ACCENT, C_ACCENT_DOWN, dp(10))
-                        : pressable(C_BTN, C_BTN_DOWN, dp(10)));
-                toolButtons[i].setTextColor(on ? C_ON_ACCENT : C_TEXT);
+                if (toolButtons[i] != null) styleSegment(toolButtons[i], i == tool);
+            }
+        }
+
+        // ---- the Save screen: name + on-screen keyboard ---------------------------
+        // The panel never opens the system keyboard: a window that takes the keyboard
+        // takes the focus away from Minecraft. This small keyboard types the only
+        // characters a cape name can have (see CapeNames).
+        private void buildNameBox() {
+            nameBox = column();
+            nameBox.setPadding(0, dp(8), 0, 0);
+            nameBox.setMinimumWidth(dp(300));
+
+            LinearLayout heading = row();
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            heading.addView(label("Name your cape", 14f, C_TEXT, true));
+            TextView sub = label("optional", 11f, C_MUTED, false);
+            sub.setPadding(dp(8), 0, 0, 0);
+            heading.addView(sub);
+            nameBox.addView(heading);
+
+            FrameLayout field = new FrameLayout(activity);
+            field.setBackground(round(C_FIELD, dp(12), C_BTN_EDGE, hairline()));
+            field.setPadding(dp(12), dp(0), dp(12), dp(0));
+            field.setMinimumHeight(dp(44));
+            nameHint = label("Empty = automatic name", 14f, C_MUTED, false);
+            nameHint.setPadding(dp(6), 0, 0, 0); // starts after the cursor instead of under it
+            field.addView(nameHint, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER_VERTICAL | Gravity.START));
+            LinearLayout valueRow = row();
+            valueRow.setGravity(Gravity.CENTER_VERTICAL);
+            nameValue = label("", 15f, C_TEXT, true);
+            nameValue.setSingleLine(true);
+            nameValue.setEllipsize(TextUtils.TruncateAt.START); // a long name shows its end, where you are typing
+            nameValue.setMaxWidth(dp(262));
+            valueRow.addView(nameValue);
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(Math.max(2, dp(2)), dp(18));
+            clp.leftMargin = dp(2);
+            valueRow.addView(new Glyph(activity, Glyph.CURSOR, C_ACCENT_LIGHT), clp);
+            field.addView(valueRow, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                    Gravity.CENTER_VERTICAL | Gravity.START));
+            nameBox.addView(field, fullWidth(8));
+
+            // key height follows the screen: tall enough to hit, short enough to leave room on a small phone
+            int screenDp = Math.round(activity.getResources().getDisplayMetrics().heightPixels / density);
+            int keyDp = Math.max(26, Math.min(36, (screenDp - 250) / 5));
+            letterKeys.clear();
+            nameBox.addView(keyRow(CapeNames.ROW_DIGITS, keyDp, 0f, null, null), fullWidth(8));
+            nameBox.addView(keyRow(CapeNames.ROW_TOP, keyDp, 0f, null, null), fullWidth(0));
+            nameBox.addView(keyRow(CapeNames.ROW_MID, keyDp, 0.5f, null, null), fullWidth(0));
+
+            shiftKey = key("Shift", keyDp, 1.5f, new Runnable() {
+                @Override public void run() {
+                    shiftOn = !shiftOn;
+                    updateNameField();
+                }
+            });
+            TextView del = key("Del", keyDp, 1.5f, new Runnable() {
+                @Override public void run() {
+                    nameText = CapeNames.backspace(nameText);
+                    shiftOn = CapeNames.wantsShift(nameText);
+                    updateNameField();
+                }
+            });
+            nameBox.addView(keyRow(CapeNames.ROW_LOW, keyDp, 0f, shiftKey, del), fullWidth(0));
+
+            LinearLayout last = row();
+            last.addView(typeKey('-', keyDp, 1.5f));
+            last.addView(typeKey('_', keyDp, 1.5f));
+            last.addView(key("space", keyDp, 7f, new Runnable() {
+                @Override public void run() {
+                    pressKey(' ');
+                }
+            }));
+            nameBox.addView(last, fullWidth(0));
+            updateNameField();
+        }
+
+        /** A row of letter / digit keys; `pad` adds half-key gaps at both ends; `left` / `right` are optional special keys. */
+        private LinearLayout keyRow(String chars, int keyDp, float pad, TextView left, TextView right) {
+            LinearLayout r = row();
+            if (pad > 0f) r.addView(new Spacer(activity), new LinearLayout.LayoutParams(0, 1, pad));
+            if (left != null) r.addView(left);
+            for (int i = 0; i < chars.length(); i++) {
+                TextView k = typeKey(chars.charAt(i), keyDp, 1f);
+                if (chars.charAt(i) >= 'a' && chars.charAt(i) <= 'z') letterKeys.add(k);
+                r.addView(k);
+            }
+            if (right != null) r.addView(right);
+            if (pad > 0f) r.addView(new Spacer(activity), new LinearLayout.LayoutParams(0, 1, pad));
+            return r;
+        }
+
+        private TextView typeKey(final char c, int keyDp, float weight) {
+            return key(String.valueOf(c), keyDp, weight, new Runnable() {
+                @Override public void run() {
+                    pressKey(c);
+                }
+            });
+        }
+
+        private TextView key(String text, int keyDp, float weight, Runnable onClick) {
+            TextView k = label(text, 12f, C_TEXT, true);
+            k.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13f);
+            k.setGravity(Gravity.CENTER);
+            k.setSingleLine(true);
+            k.setClickable(true);
+            k.setBackground(pressable(C_BTN, C_BTN_DOWN, dp(8), C_BTN_EDGE, hairline()));
+            k.setOnClickListener(safe(onClick));
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(keyDp), weight);
+            p.setMargins(dp(2), dp(2), dp(2), dp(2));
+            k.setLayoutParams(p);
+            return k;
+        }
+
+        private void pressKey(char c) {
+            nameText = CapeNames.type(nameText, c, shiftOn);
+            shiftOn = CapeNames.wantsShift(nameText);
+            updateNameField();
+        }
+
+        private void updateNameField() {
+            if (nameValue == null) return;
+            nameValue.setText(nameText);
+            nameHint.setVisibility(nameText.length() == 0 ? View.VISIBLE : View.GONE);
+            for (int i = 0; i < letterKeys.size(); i++) {
+                TextView k = letterKeys.get(i);
+                String t = k.getText().toString().toLowerCase(Locale.US);
+                k.setText(shiftOn ? t.toUpperCase(Locale.US) : t);
+            }
+            if (shiftKey != null) {
+                shiftKey.setTextColor(shiftOn ? C_ACCENT_LIGHT : C_TEXT);
+                shiftKey.setBackground(shiftOn
+                        ? pressable(C_ACCENT_SOFT, C_BTN_DOWN, dp(8), C_ACCENT, hairline())
+                        : pressable(C_BTN, C_BTN_DOWN, dp(8), C_BTN_EDGE, hairline()));
             }
         }
 
@@ -1317,6 +1633,14 @@ public final class CapePauseOverlay {
                 @Override public void onGlobalLayout() {
                     ViewTreeObserver o = card.getViewTreeObserver();
                     if (o.isAlive()) o.removeOnGlobalLayoutListener(this);
+                    // the card has its final width now, so the status line height is known better: fit again
+                    int before = lastMaxHeight;
+                    applyMaxHeight();
+                    if (lastMaxHeight != before && refitCount++ < 3) {
+                        clampAfterLayout(); // the size changes once more: clamp after that layout
+                        return;
+                    }
+                    refitCount = 0;
                     moveTo(posX, posY);
                 }
             });
@@ -1355,12 +1679,14 @@ public final class CapePauseOverlay {
         private void applyMode() {
             boolean open = !collapsed;
             scroll.setVisibility(open ? View.VISIBLE : View.GONE);
-            activeText.setVisibility(open && mode != MODE_CANVAS ? View.VISIBLE : View.GONE);
+            chip.setVisibility(open && (mode == MODE_MENU || mode == MODE_LIST) ? View.VISIBLE : View.GONE);
             menuBox.setVisibility(open && mode == MODE_MENU ? View.VISIBLE : View.GONE);
             listBox.setVisibility(open && mode == MODE_LIST ? View.VISIBLE : View.GONE);
             canvasBox.setVisibility(open && mode == MODE_CANVAS ? View.VISIBLE : View.GONE);
+            nameBox.setVisibility(open && mode == MODE_NAME ? View.VISIBLE : View.GONE);
             footerList.setVisibility(open && mode == MODE_LIST ? View.VISIBLE : View.GONE);
             footerCanvas.setVisibility(open && mode == MODE_CANVAS ? View.VISIBLE : View.GONE);
+            footerName.setVisibility(open && mode == MODE_NAME ? View.VISIBLE : View.GONE);
             msgText.setVisibility(open && msgText.getText().length() > 0 ? View.VISIBLE : View.GONE);
             scroll.scrollTo(0, 0);
             applyMaxHeight();
@@ -1370,13 +1696,22 @@ public final class CapePauseOverlay {
         /** The scrolling part may use whatever the pinned parts and the screen margins leave over. */
         private void applyMaxHeight() {
             int screenH = activity.getResources().getDisplayMetrics().heightPixels;
-            boolean footer = !collapsed && (mode == MODE_LIST || mode == MODE_CANVAS);
+            boolean footer = !collapsed && mode != MODE_MENU;
             boolean status = !collapsed && msgText.getVisibility() == View.VISIBLE;
+            int statusPx = 0;
+            if (status) {
+                // lines the status text needs (a little pessimistic on purpose), 3 at most
+                float textW = msgText.getPaint().measureText(msgText.getText().toString());
+                float cardW = card.getWidth();
+                float availW = Math.max(dp(256), cardW > 0 ? cardW - dp(24) : dp(256));
+                int lines = Math.min(3, Math.max(1, (int) Math.ceil(textW / (availW * 0.92f))));
+                statusPx = dp(8) + Math.round(lines * msgText.getTextSize() * 1.25f);
+            }
             int reserved = dp(16)                  // 8dp free above and below the card
-                    + dp(18)                       // card padding
+                    + dp(22)                       // card padding
                     + dp(36)                       // header
                     + (footer ? dp(48) : 0)        // pinned Back / Close + Save row
-                    + (status ? dp(48) : 0);       // pinned status line (up to 3 lines)
+                    + statusPx;                    // pinned status line
             int max = Math.max(dp(90), screenH - reserved);
             scroll.setMaxHeightPx(max);
             if (max != lastMaxHeight) {
@@ -1391,8 +1726,9 @@ public final class CapePauseOverlay {
             if (raw == null) raw = "";
             boolean err = raw.startsWith("ERR:");
             boolean ok = raw.startsWith("OK:");
+            statusIsError = err;
             String text = (err || ok) ? raw.substring(raw.indexOf(':') + 1).trim() : raw.trim();
-            msgText.setTextColor(err ? C_DANGER : ok ? C_ACCENT : C_MUTED);
+            msgText.setTextColor(err ? C_DANGER : ok ? C_ACCENT_LIGHT : C_MUTED);
             msgText.setText(text);
             msgText.setVisibility(text.length() == 0 || collapsed ? View.GONE : View.VISIBLE);
             applyMaxHeight();
@@ -1406,8 +1742,11 @@ public final class CapePauseOverlay {
 
                 @Override void finish(Ui ui, String result) {
                     ui.activeName = result == null ? "" : result;
-                    ui.activeText.setText(ui.activeName.length() == 0
-                            ? "No cape selected" : "Active: " + ui.activeName);
+                    boolean on = ui.activeName.length() > 0;
+                    ui.activeText.setText(on ? "Active: " + ui.activeName : "No cape selected");
+                    ui.activeText.setTextColor(on ? C_TEXT : C_MUTED);
+                    ui.chipDot.setGlyphColor(on ? C_ACCENT_LIGHT : C_MUTED);
+                    if (ui.mode == MODE_LIST) ui.renderList(); // the highlighted row follows the active cape
                 }
             });
         }
@@ -1443,52 +1782,115 @@ public final class CapePauseOverlay {
         }
 
         private void showList() {
+            pendingDelete = "";
             setMode(MODE_LIST);
             listBox.removeAllViews();
             listBox.addView(label("Loading list...", 12f, C_MUTED, false));
+            loadList();
+        }
+
+        /** Asks the native side for the capes on disk and draws the list. */
+        private void loadList() {
             run(new Job() {
                 @Override String work() {
                     return nativeListCapes();
                 }
 
                 @Override void finish(Ui ui, String result) {
-                    ui.fillList(result);
+                    ui.capeNames = CapeNames.split(result);
+                    ui.renderList();
                 }
             });
         }
 
-        private void fillList(String names) {
+        private void renderList() {
             listBox.removeAllViews();
-            String[] parts = (names == null || names.length() == 0) ? new String[0] : names.split("\n");
-            if (parts.length == 0) {
+            if (capeNames.isEmpty()) {
                 TextView empty = label("No capes yet. Use Canvas, or add a .png to the customcape folder.", 12f, C_MUTED, false);
                 empty.setMaxWidth(dp(260));
                 empty.setPadding(dp(4), dp(8), dp(4), dp(8));
                 listBox.addView(empty);
                 return;
             }
-            for (int i = 0; i < parts.length; i++) {
-                final String name = parts[i].trim();
-                if (name.length() == 0) continue;
-                boolean active = name.equals(activeName);
-                TextView row = label(name, 13f, active ? C_ON_ACCENT : C_TEXT, active);
-                row.setPadding(dp(12), dp(10), dp(12), dp(10));
-                row.setMinHeight(dp(38));
-                row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setClickable(true);
-                row.setBackground(active
-                        ? pressable(C_ACCENT, C_ACCENT_DOWN, dp(10))
-                        : pressable(0x00000000, C_BTN_DOWN, dp(10)));
-                row.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View v) {
-                        equip(name);
-                    }
-                });
+            for (int i = 0; i < capeNames.size(); i++) {
+                String name = capeNames.get(i);
+                View row = name.equals(pendingDelete) ? confirmRow(name) : capeRow(name);
                 LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                rp.bottomMargin = dp(2);
+                rp.bottomMargin = dp(6);
                 listBox.addView(row, rp);
             }
+        }
+
+        /** A cape in the list: tap the row to wear it, tap the bin to delete it. */
+        private View capeRow(final String name) {
+            boolean active = name.equals(activeName);
+            LinearLayout r = row();
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setPadding(dp(12), dp(2), dp(4), dp(2));
+            r.setMinimumHeight(dp(44));
+            r.setClickable(true);
+            r.setBackground(active
+                    ? round(C_ACCENT_SOFT, dp(12), C_ACCENT, hairline())
+                    : pressable(C_BTN, C_BTN_DOWN, dp(12), C_BTN_EDGE, hairline()));
+            r.setOnClickListener(safe(new Runnable() {
+                @Override public void run() {
+                    equip(name);
+                }
+            }));
+
+            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(14), dp(14));
+            dotLp.rightMargin = dp(10);
+            r.addView(new Glyph(activity, active ? Glyph.DOT : Glyph.RING, active ? C_ACCENT_LIGHT : C_MUTED), dotLp);
+
+            TextView nm = label(name, 13f, C_TEXT, active);
+            nm.setSingleLine(true);
+            nm.setEllipsize(TextUtils.TruncateAt.END);
+            r.addView(nm, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            LinearLayout bin = new LinearLayout(activity);
+            bin.setGravity(Gravity.CENTER);
+            bin.setClickable(true);
+            bin.setBackground(pressable(0x00000000, C_DANGER_BG, dp(10)));
+            bin.setOnClickListener(safe(new Runnable() {
+                @Override public void run() {
+                    pendingDelete = name;
+                    renderList();
+                }
+            }));
+            bin.addView(new Glyph(activity, Glyph.TRASH, C_DANGER), new LinearLayout.LayoutParams(dp(20), dp(20)));
+            r.addView(bin, new LinearLayout.LayoutParams(dp(40), dp(40)));
+            return r;
+        }
+
+        /** The "Delete?" question that replaces a row. Nothing is deleted before the red button is pressed. */
+        private View confirmRow(final String name) {
+            LinearLayout box = column();
+            box.setPadding(dp(12), dp(10), dp(12), dp(8));
+            box.setBackground(round(C_DANGER_BG, dp(12), C_DANGER_EDGE, hairline()));
+
+            TextView q = label("Delete " + name + "?", 13f, C_TEXT, true);
+            q.setSingleLine(true);
+            q.setEllipsize(TextUtils.TruncateAt.END);
+            box.addView(q);
+            TextView note = label("The cape file is removed for good.", 11f, C_MUTED, false);
+            note.setPadding(0, dp(2), 0, dp(6));
+            box.addView(note);
+
+            LinearLayout btns = row();
+            btns.addView(compactButton("Cancel", 0, new Runnable() {
+                @Override public void run() {
+                    pendingDelete = "";
+                    renderList();
+                }
+            }), weighted(2));
+            btns.addView(compactButton("Delete", 3, new Runnable() {
+                @Override public void run() {
+                    deleteCape(name);
+                }
+            }), weighted(2));
+            box.addView(btns);
+            return box;
         }
 
         private void equip(final String name) {
@@ -1506,6 +1908,7 @@ public final class CapePauseOverlay {
             });
         }
 
+        /** Takes the cape off. The file stays: it is still in Select Cape (delete it there). */
         private void removeCape() {
             run(new Job() {
                 @Override String work() {
@@ -1513,13 +1916,51 @@ public final class CapePauseOverlay {
                 }
 
                 @Override void finish(Ui ui, String result) {
-                    ui.setStatus(result);
+                    boolean ok = result != null && result.startsWith("OK:");
+                    ui.setStatus(ok ? "OK: Cape removed. It stays in Select Cape; delete it there to erase it." : result);
                     ui.refreshActive();
                 }
             });
         }
 
-        private void saveDrawing() {
+        /** Deletes the cape file(s) for good. The active cape is taken off first, so no selection is left pointing at nothing. */
+        private void deleteCape(final String name) {
+            final boolean wasActive = name.equals(activeName);
+            final String dir = sCapeDir;
+            pendingDelete = "";
+            setStatus("Deleting " + name + "...");
+            run(new Job() {
+                @Override String work() {
+                    if (dir.length() == 0) return "ERR: The cape folder is unknown.";
+                    if (wasActive) nativeRemoveCape();
+                    int n = CapeNames.deleteCapeFiles(new File(dir), name);
+                    if (n == 0) return "ERR: Could not delete " + name + " (file missing or storage is read-only).";
+                    logFile("deleted cape " + name + " (" + n + " file(s))");
+                    return "OK: Deleted " + name + ".";
+                }
+
+                @Override void finish(Ui ui, String result) {
+                    ui.setStatus(result);
+                    ui.refreshActive();
+                    ui.loadList();
+                }
+            });
+        }
+
+        /** Save pressed on the canvas: ask for an (optional) name first. */
+        private void openNameScreen() {
+            if (sModel.isEmpty()) {
+                setStatus("ERR: Canvas is empty.");
+                return;
+            }
+            setStatus("");
+            shiftOn = CapeNames.wantsShift(nameText);
+            updateNameField();
+            setMode(MODE_NAME);
+        }
+
+        /** Save pressed on the name screen: no name typed = the automatic "Drawing..." name. */
+        private void confirmSave() {
             if (sModel.isEmpty()) {
                 setStatus("ERR: Canvas is empty.");
                 return;
@@ -1527,17 +1968,25 @@ public final class CapePauseOverlay {
             final byte[] rgba = sModel.toRgba();
             final int texW = sModel.texW;
             final int texH = sModel.texH;
-            final String name = "Drawing" + new SimpleDateFormat("MMddHHmmss", Locale.US).format(new Date());
+            final String typed = CapeNames.clean(nameText);
             setStatus("Saving...");
             run(new Job() {
                 @Override String work() {
+                    // never replace another cape by accident: a taken name gets " (2)" and so on
+                    List<String> existing = CapeNames.split(nativeListCapes());
+                    String name = CapeNames.unique(typed.length() == 0 ? CapeNames.autoName(new Date()) : typed, existing);
                     return nativeSaveDrawn(rgba, texW, texH, name);
                 }
 
                 @Override void finish(Ui ui, String result) {
                     ui.setStatus(result);
                     ui.refreshActive();
-                    if (result != null && result.startsWith("OK:")) ui.setMode(MODE_MENU);
+                    if (result != null && result.startsWith("OK:")) {
+                        ui.nameText = "";
+                        ui.shiftOn = true;
+                        ui.updateNameField();
+                        ui.setMode(MODE_MENU);
+                    }
                 }
             });
         }
